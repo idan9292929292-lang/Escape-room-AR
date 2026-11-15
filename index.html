@@ -1,988 +1,940 @@
 <!DOCTYPE html>
-<html lang="he" dir="rtl">
+<html lang="en">
 <head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no,viewport-fit=cover">
-<meta name="apple-mobile-web-app-capable" content="yes">
-<meta name="theme-color" content="#0b0f1a">
-<title>חדר בריחה AR – הכיתה</title>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover" />
+<meta name="theme-color" content="#0a0f1e" />
+<meta name="apple-mobile-web-app-capable" content="yes" />
+<title>AR Escape Room</title>
+
+<!--
+  ============================================================================
+  AR ESCAPE ROOM — single-file WebAR game
+  ----------------------------------------------------------------------------
+  Stack (all from CDN, nothing to install):
+    • three.js r160            – 3D rendering
+    • MindAR 1.2.5 (image)     – natural-image tracking in the mobile browser
+    • MindAR Compiler          – builds the .mind target file ON THE PHONE from
+                                 the 4 photos taken in the calibration screen
+  Flow:
+    Calibration screen → photos of 4 targets (+ optional face image)
+      → "Calibrate" compiles them into a tracking file (saved in IndexedDB)
+      → "Start Game" opens the camera and runs a strict linear sequence:
+         0 Projector → 1 Person → 2 Air-conditioner → 3 Mailbox #16
+    A target only reacts when it is the CURRENT stage. No text clues are shown.
+  Game-master tools:
+    • Triple-tap the timer to force the current stage (useful if tracking fails)
+    • ✕ button (top-left) returns to the calibration screen
+  Must be served over HTTPS (GitHub Pages is fine) for camera access.
+  ============================================================================
+-->
+
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/",
+    "mindar-image-three": "https://cdn.jsdelivr.net/npm/mind-ar@1.2.5/dist/mindar-image-three.prod.js"
+  }
+}
+</script>
+
 <style>
   :root{
-    --bg:#0b0f1a; --panel:rgba(12,17,30,.88); --line:rgba(255,255,255,.12);
-    --text:#f3f5fa; --muted:#9aa4b8; --accent:#ffd34d; --cyan:#4fe3ff; --ok:#3ddc84; --bad:#ff5c6c;
-    --safe-t:env(safe-area-inset-top,0px); --safe-b:env(safe-area-inset-bottom,0px);
+    --bg:#0a0f1e; --panel:#121a30; --panel2:#18223d; --line:#26324f;
+    --text:#e9eeff; --muted:#8e9bc1; --accent:#5cc8ff; --ok:#43e0a0;
+    --warn:#ffb84d; --err:#ff5d73;
+    --safe-t: env(safe-area-inset-top, 0px); --safe-b: env(safe-area-inset-bottom, 0px);
   }
   *{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
-  html,body{margin:0;height:100%;background:var(--bg);color:var(--text);overflow:hidden;
-    font-family:"Rubik","Heebo","Assistant","Segoe UI",system-ui,-apple-system,Arial,sans-serif;
-    -webkit-user-select:none;user-select:none;overscroll-behavior:none}
-  button{font-family:inherit;cursor:pointer}
-  .hidden{display:none!important}
+  html,body{margin:0;height:100%;background:#000;color:var(--text);
+    font-family:system-ui,-apple-system,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+    overflow:hidden;overscroll-behavior:none;-webkit-user-select:none;user-select:none}
+  button{font:inherit}
+  .vh{position:absolute!important;width:1px;height:1px;opacity:0;overflow:hidden;pointer-events:none}
 
-  #cam{position:fixed;inset:0;width:100%;height:100%;object-fit:cover;z-index:0;background:#000}
-  #fx{position:fixed;inset:0;z-index:1;pointer-events:none}
+  /* ---------- AR layer ---------- */
+  #ar{position:fixed;inset:0;z-index:0;overflow:hidden;background:#000}
+  #ar video{transition:filter 2.5s ease}
+  body.cold #ar video{filter:saturate(.5) brightness(1.08) contrast(1.06) hue-rotate(-10deg)}
 
-  /* ---------- full-screen cards ---------- */
-  .screen{position:fixed;inset:0;z-index:5;display:flex;align-items:center;justify-content:center;padding:24px;
-    background:radial-gradient(120% 90% at 50% 0%,rgba(40,60,120,.55),rgba(5,8,16,.92))}
-  .card{max-width:420px;width:100%;text-align:center}
-  .card h1{font-size:30px;margin:0 0 10px;line-height:1.2}
-  .card p{color:#c9d1e3;font-size:16px;line-height:1.6;margin:0 0 22px}
-  .big{display:block;width:100%;padding:16px 20px;border:0;border-radius:16px;font-size:19px;font-weight:700;
-    background:linear-gradient(180deg,#ffe07a,#ffbf2e);color:#1a1300;box-shadow:0 8px 24px rgba(255,200,60,.35)}
-  .big:disabled{background:#3a4152;color:#7c869b;box-shadow:none}
-  .ghost{display:block;width:100%;margin-top:10px;padding:12px;border-radius:14px;border:1px solid var(--line);
-    background:transparent;color:var(--text);font-size:15px}
-  .emoji{font-size:54px;margin-bottom:6px}
-  #err{color:#ffb3bb;font-size:14px;margin-top:14px;line-height:1.5}
-
-  /* ---------- gear ---------- */
-  #gearBtn{position:fixed;top:calc(10px + var(--safe-t));left:10px;z-index:8;width:40px;height:40px;border-radius:50%;
-    border:1px solid var(--line);background:rgba(0,0,0,.35);color:#fff;font-size:20px;opacity:.75;
-    backdrop-filter:blur(6px);-webkit-backdrop-filter:blur(6px)}
-
-  /* ---------- setup ---------- */
-  #setup{position:fixed;inset:0;z-index:6}
-  #setupHead{position:absolute;top:calc(10px + var(--safe-t));right:12px;left:60px;text-align:center;font-weight:700;font-size:17px;
-    text-shadow:0 2px 8px rgba(0,0,0,.8)}
-  #guide{position:absolute;border:3px dashed rgba(255,255,255,.9);border-radius:14px;box-shadow:0 0 0 9999px rgba(0,0,0,.38)}
-  #guide span{position:absolute;bottom:-28px;left:0;right:0;text-align:center;font-size:13px;color:#fff;text-shadow:0 1px 4px #000}
-  #guide.flash{animation:flash .45s}
-  @keyframes flash{0%{background:rgba(255,255,255,.85)}100%{background:transparent}}
-  #panel{position:absolute;left:0;right:0;bottom:0;max-height:56vh;overflow-y:auto;background:var(--panel);
-    border-top:1px solid var(--line);border-radius:22px 22px 0 0;padding:14px 16px calc(16px + var(--safe-b));
-    backdrop-filter:blur(10px);-webkit-backdrop-filter:blur(10px)}
-  #stepRow{display:flex;align-items:center;gap:14px;margin-bottom:12px}
-  #stepText{flex:1;font-size:17px;font-weight:700;line-height:1.35}
-  #stepText small{display:block;font-weight:400;color:var(--muted);font-size:13px;margin-top:2px}
-  #shutter{flex:none;width:66px;height:66px;border-radius:50%;border:4px solid #fff;background:var(--accent);
-    box-shadow:0 0 0 4px rgba(255,211,77,.3)}
-  #shutter:active{transform:scale(.92)}
-  .cards{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-bottom:14px}
-  .tcard{background:rgba(255,255,255,.05);border:1px solid var(--line);border-radius:12px;padding:6px;text-align:center}
-  .tcard.active{border-color:var(--accent);box-shadow:0 0 0 2px rgba(255,211,77,.35)}
-  .thumb{aspect-ratio:1/.62;border-radius:8px;background:#1a2133 center/cover no-repeat;display:flex;align-items:center;
-    justify-content:center;color:var(--muted);font-size:22px;font-weight:700}
-  .tname{font-size:12px;margin:5px 0 4px;line-height:1.25;min-height:30px}
-  .retake{width:100%;font-size:12px;padding:5px;border-radius:8px;border:1px solid var(--line);background:transparent;color:var(--text)}
-  .meter{height:6px;border-radius:3px;background:rgba(255,255,255,.1);margin-top:6px;overflow:hidden}
-  .meter i{display:block;height:100%;width:0;background:var(--bad);transition:width .25s,background .25s}
-  .mval{font-size:11px;color:var(--muted);margin-top:2px}
-  .row{display:flex;align-items:center;gap:10px;margin:10px 0;font-size:14px}
-  .row label{flex:none;min-width:92px}
-  .row input[type=range]{flex:1;accent-color:var(--accent)}
-  .row select,.row input[type=text]{flex:1;background:#141b2b;color:#fff;border:1px solid var(--line);border-radius:10px;padding:8px;font-size:15px;font-family:inherit}
-  #sensVal{min-width:34px;text-align:center;font-weight:700}
-  .hint{font-size:12px;color:var(--muted);line-height:1.5;margin:4px 0 12px}
-  #clearBtn{border-color:rgba(255,92,108,.4);color:#ffb3bb}
+  /* ---------- Atmosphere / FX overlays ---------- */
+  .layer{position:fixed;inset:0;pointer-events:none}
+  #tint{z-index:5;opacity:0;transition:opacity 2.5s ease;
+    background:
+      radial-gradient(ellipse at center, rgba(180,220,255,0) 45%, rgba(225,242,255,.55) 100%),
+      linear-gradient(180deg, rgba(40,110,255,.26), rgba(90,170,255,.18));}
+  body.cold #tint{opacity:1}
+  #snow{z-index:6}
+  #fx{z-index:7}
 
   /* ---------- HUD ---------- */
-  #hud{position:fixed;inset:0;z-index:3;pointer-events:none}
-  #topbar{position:absolute;top:calc(10px + var(--safe-t));right:12px;left:60px;display:flex;align-items:center;gap:10px}
-  .pill{background:rgba(0,0,0,.45);border:1px solid var(--line);border-radius:20px;padding:6px 12px;font-size:14px;font-weight:700;
-    backdrop-filter:blur(6px);-webkit-backdrop-filter:blur(6px)}
-  #dots{display:flex;gap:6px;align-items:center}
-  #dots i{width:11px;height:11px;border-radius:50%;background:rgba(255,255,255,.25);display:block;transition:.3s}
-  #dots i.on{background:var(--accent);box-shadow:0 0 8px var(--accent)}
-  #dots i.done{background:var(--ok)}
-  #timer{font-variant-numeric:tabular-nums;direction:ltr}
-  #skipBtn{pointer-events:auto;margin-right:auto;font-size:11px;padding:5px 9px;border-radius:12px;border:1px solid var(--line);
-    background:rgba(0,0,0,.3);color:rgba(255,255,255,.6)}
-  #confMini{position:absolute;top:calc(56px + var(--safe-t));right:12px;width:90px;height:4px;border-radius:2px;background:rgba(255,255,255,.12);overflow:hidden;opacity:.7}
-  #confMini i{display:block;height:100%;width:0;background:var(--cyan);transition:width .15s}
-  #confMini b{position:absolute;top:0;bottom:0;width:2px;background:#fff}
-  #prompt{position:absolute;left:12px;right:12px;bottom:calc(14px + var(--safe-b));background:var(--panel);border:1px solid var(--line);
-    border-radius:18px;padding:12px 16px 14px;text-align:center;backdrop-filter:blur(8px);-webkit-backdrop-filter:blur(8px);transition:border-color .3s,box-shadow .3s}
-  #prompt.found{border-color:var(--accent);box-shadow:0 0 24px rgba(255,211,77,.35)}
-  #stageLabel{font-size:12px;color:var(--muted);margin-bottom:4px}
-  #promptText{font-size:18px;font-weight:700;line-height:1.4}
-  #prog{height:4px;border-radius:2px;background:rgba(255,255,255,.1);margin-top:10px;overflow:hidden}
-  #prog i{display:block;height:100%;width:0;background:linear-gradient(90deg,var(--accent),#ff9f2e)}
-  #toast{position:fixed;top:38%;left:50%;transform:translate(-50%,-50%) scale(.8);z-index:7;opacity:0;pointer-events:none;
-    background:rgba(20,30,20,.9);border:1px solid var(--ok);color:#d7ffe6;padding:14px 22px;border-radius:16px;font-size:20px;font-weight:800;
-    transition:opacity .3s,transform .3s;white-space:nowrap}
-  #toast.show{opacity:1;transform:translate(-50%,-50%) scale(1)}
+  #hud{position:fixed;inset:0;z-index:10;pointer-events:none;display:none}
+  body.playing #hud{display:block}
+  .hud-top{position:absolute;left:0;right:0;top:calc(10px + var(--safe-t));
+    display:flex;align-items:center;justify-content:space-between;padding:0 14px}
+  .hud-btn{pointer-events:auto;width:40px;height:40px;border-radius:50%;border:1px solid rgba(255,255,255,.18);
+    background:rgba(10,15,30,.45);color:#fff;font-size:18px;backdrop-filter:blur(8px);-webkit-backdrop-filter:blur(8px)}
+  .dots{display:flex;gap:10px;padding:10px 14px;border-radius:999px;background:rgba(10,15,30,.45);
+    border:1px solid rgba(255,255,255,.12);backdrop-filter:blur(8px);-webkit-backdrop-filter:blur(8px)}
+  .dot{width:11px;height:11px;border-radius:50%;background:rgba(255,255,255,.18);transition:all .5s}
+  .dot.done{background:var(--ok);box-shadow:0 0 10px var(--ok)}
+  .dot.now{background:rgba(255,255,255,.55);animation:pulse 1.6s infinite}
+  @keyframes pulse{0%,100%{transform:scale(1);opacity:.6}50%{transform:scale(1.35);opacity:1}}
+  #timer{pointer-events:auto;min-width:64px;text-align:center;padding:9px 12px;border-radius:999px;
+    font-variant-numeric:tabular-nums;font-weight:600;font-size:14px;background:rgba(10,15,30,.45);
+    border:1px solid rgba(255,255,255,.12);backdrop-filter:blur(8px);-webkit-backdrop-filter:blur(8px)}
 
-  /* ---------- win ---------- */
-  #win{background:radial-gradient(120% 90% at 50% 0%,rgba(60,120,80,.55),rgba(5,8,16,.9))}
-  .codeBox{display:flex;gap:10px;justify-content:center;direction:ltr;margin:6px 0 18px}
-  .codeBox span{width:52px;height:64px;border-radius:12px;background:rgba(79,227,255,.12);border:2px solid var(--cyan);
-    display:flex;align-items:center;justify-content:center;font-size:34px;font-weight:800;color:#dffaff;box-shadow:0 0 18px rgba(79,227,255,.4)}
-  .stat{font-size:15px;color:#c9d1e3;margin-bottom:20px}
+  /* scanning reticle (purely decorative, no hints) */
+  #reticle{position:absolute;left:50%;top:50%;width:200px;height:200px;transform:translate(-50%,-50%);opacity:.35;transition:opacity .6s}
+  #reticle i{position:absolute;width:26px;height:26px;border:2px solid #fff}
+  #reticle i:nth-child(1){left:0;top:0;border-right:0;border-bottom:0;border-radius:8px 0 0 0}
+  #reticle i:nth-child(2){right:0;top:0;border-left:0;border-bottom:0;border-radius:0 8px 0 0}
+  #reticle i:nth-child(3){left:0;bottom:0;border-right:0;border-top:0;border-radius:0 0 0 8px}
+  #reticle i:nth-child(4){right:0;bottom:0;border-left:0;border-top:0;border-radius:0 0 8px 0}
+  #reticle::after{content:"";position:absolute;left:8%;right:8%;height:2px;top:10%;
+    background:linear-gradient(90deg,transparent,rgba(92,200,255,.9),transparent);animation:scan 2.6s ease-in-out infinite}
+  @keyframes scan{0%,100%{top:10%}50%{top:88%}}
+  body.won #reticle{opacity:0}
+
+  /* unlock flash */
+  #flash{position:fixed;inset:0;z-index:9;pointer-events:none;opacity:0;
+    background:radial-gradient(circle at center, rgba(255,255,255,.55), rgba(255,255,255,0) 70%)}
+  #flash.go{animation:flash .9s ease-out}
+  @keyframes flash{0%{opacity:0}15%{opacity:1}100%{opacity:0}}
+
+  /* ---------- Full-screen panels ---------- */
+  .screen{position:fixed;inset:0;z-index:30;overflow-y:auto;-webkit-overflow-scrolling:touch;
+    background:radial-gradient(1200px 600px at 50% -10%, #1b2a55 0%, var(--bg) 60%);
+    padding:calc(18px + var(--safe-t)) 16px calc(24px + var(--safe-b))}
+  .screen[hidden]{display:none}
+  .wrap{max-width:560px;margin:0 auto}
+  h1{font-size:26px;margin:6px 0 4px;letter-spacing:.3px}
+  h1 span{background:linear-gradient(90deg,#7fd6ff,#b59bff);-webkit-background-clip:text;background-clip:text;color:transparent}
+  .sub{color:var(--muted);font-size:14px;line-height:1.5;margin:0 0 16px}
+  .cards{display:flex;flex-direction:column;gap:10px}
+  .card{display:flex;gap:12px;align-items:center;background:var(--panel);border:1px solid var(--line);
+    border-radius:16px;padding:10px;position:relative;transition:border-color .3s}
+  .card.ready{border-color:rgba(67,224,160,.55)}
+  .thumb{flex:0 0 76px;height:76px;border-radius:12px;background:var(--panel2);display:grid;place-items:center;
+    overflow:hidden;font-size:30px;border:1px dashed var(--line)}
+  .card.ready .thumb{border-style:solid;border-color:transparent}
+  .thumb img{width:100%;height:100%;object-fit:cover}
+  .meta{flex:1;min-width:0}
+  .ttl{font-weight:650;font-size:15px}
+  .ttl em{font-style:normal;font-weight:500;font-size:11px;color:var(--muted);border:1px solid var(--line);
+    padding:1px 6px;border-radius:99px;margin-left:6px;vertical-align:middle}
+  .hint{font-size:12px;color:var(--muted);margin:3px 0 8px;line-height:1.35}
+  .actions{display:flex;gap:6px;flex-wrap:wrap}
+  .btn{display:inline-flex;align-items:center;justify-content:center;gap:6px;border:0;cursor:pointer;
+    background:linear-gradient(180deg,#3aa8ff,#2a7fff);color:#fff;font-weight:650;border-radius:12px;
+    padding:12px 16px;font-size:15px;position:relative}
+  .btn.sm{padding:7px 11px;font-size:13px;border-radius:10px}
+  .btn.ghost{background:transparent;border:1px solid var(--line);color:var(--text)}
+  .btn:disabled{opacity:.45;filter:grayscale(.5)}
+  .btn.block{width:100%;padding:15px;font-size:16px;border-radius:14px}
+  .btn.go{background:linear-gradient(180deg,#43e0a0,#1fb67a)}
+  .check{position:absolute;top:8px;right:10px;color:var(--ok);font-weight:800;opacity:0;transition:opacity .3s}
+  .card.ready .check{opacity:1}
+  .footer{margin-top:16px;display:flex;flex-direction:column;gap:10px}
+  .row{display:flex;gap:8px}
+  .row .btn{flex:1}
+  .progress{height:8px;border-radius:99px;background:var(--panel2);overflow:hidden;display:none}
+  .progress.on{display:block}
+  .progress b{display:block;height:100%;width:0;background:linear-gradient(90deg,#5cc8ff,#b59bff);transition:width .2s}
+  .status{font-size:13px;color:var(--muted);min-height:18px;text-align:center}
+  .status.err{color:var(--err)} .status.ok{color:var(--ok)}
+  details.tips{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:10px 14px;margin:12px 0 4px;font-size:13px;color:var(--muted)}
+  details.tips summary{color:var(--text);font-weight:600;cursor:pointer}
+  details.tips li{margin:6px 0;line-height:1.4}
+
+  /* loading / error / victory */
+  .center{min-height:100%;display:flex;flex-direction:column;align-items:center;justify-content:center;text-align:center;gap:14px}
+  .spinner{width:54px;height:54px;border-radius:50%;border:4px solid rgba(255,255,255,.12);border-top-color:var(--accent);animation:spin 1s linear infinite}
+  @keyframes spin{to{transform:rotate(360deg)}}
+  .err-ico{font-size:52px}
+  .msg{color:var(--muted);font-size:14px;line-height:1.55;max-width:420px;white-space:pre-line}
+  #victory{background:transparent;z-index:25;pointer-events:none}
+  #victory .card-v{pointer-events:auto;background:rgba(10,15,30,.72);border:1px solid rgba(255,255,255,.15);border-radius:22px;
+    padding:24px 26px;backdrop-filter:blur(10px);-webkit-backdrop-filter:blur(10px);transform:scale(.8);opacity:0;transition:all .6s cubic-bezier(.2,1.4,.4,1)}
+  #victory.show .card-v{transform:scale(1);opacity:1}
+  #victory h2{margin:0 0 6px;font-size:30px}
+  #victory .time{font-size:15px;color:var(--muted);margin-bottom:16px}
 </style>
 </head>
+
 <body>
+  <!-- AR camera + 3D canvas are injected here by MindAR -->
+  <div id="ar"></div>
 
-<video id="cam" playsinline muted autoplay></video>
-<canvas id="fx"></canvas>
+  <!-- atmosphere + effects -->
+  <div id="tint" class="layer"></div>
+  <canvas id="snow" class="layer"></canvas>
+  <canvas id="fx" class="layer"></canvas>
+  <div id="flash"></div>
 
-<button id="gearBtn" class="hidden" aria-label="הגדרות">⚙</button>
-
-<!-- Splash -->
-<div id="splash" class="screen">
-  <div class="card">
-    <div class="emoji">🔐</div>
-    <h1>חדר בריחה בכיתה</h1>
-    <p>משחק מציאות רבודה – כוונו את המצלמה אל חפצים בכיתה כדי לחשוף רמזים ולפענח את הקוד.</p>
-    <button class="big" id="camBtn">הפעלת מצלמה</button>
-    <div id="err"></div>
-  </div>
-</div>
-
-<!-- Intro (when all targets already calibrated) -->
-<div id="intro" class="screen hidden">
-  <div class="card">
-    <div class="emoji">🚪</div>
-    <h1>הדלת ננעלה!</h1>
-    <p>המורה יצא, והדלת של הכיתה ננעלה מאחוריו. רק מי שיגלה את סודות הכיתה ימצא את הקוד ליציאה.<br><b>הרמז הראשון: משהו מעליכם מתחיל לפעול…</b></p>
-    <button class="big" id="introStart">התחל משחק</button>
-  </div>
-</div>
-
-<!-- Setup / Calibration -->
-<div id="setup" class="hidden">
-  <div id="guide"><span>מרכזו את האובייקט בתוך המסגרת</span></div>
-  <div id="setupHead">מצב הגדרת משחק</div>
-  <div id="panel">
-    <div id="stepRow">
-      <div id="stepText"></div>
-      <button id="shutter" aria-label="צלם"></button>
+  <!-- in-game HUD (no clues: only progress dots + timer) -->
+  <div id="hud">
+    <div class="hud-top">
+      <button class="hud-btn" id="exitBtn" aria-label="Exit">✕</button>
+      <div class="dots" id="dots"><span class="dot"></span><span class="dot"></span><span class="dot"></span><span class="dot"></span></div>
+      <div id="timer">00:00</div>
     </div>
-    <div class="cards" id="cards"></div>
-    <div class="row">
-      <label for="sens">רגישות זיהוי</label>
-      <input type="range" id="sens" min="0" max="100" step="1">
-      <span id="sensVal"></span>
+    <div id="reticle"><i></i><i></i><i></i><i></i></div>
+  </div>
+
+  <!-- ===================== SETUP / CALIBRATION ===================== -->
+  <section id="setup" class="screen">
+    <div class="wrap">
+      <h1>🔐 <span>AR Escape Room</span></h1>
+      <p class="sub">Game-master setup. Photograph each target <b>in the room</b>, from roughly where players will stand. The app learns them and builds the tracking map on this phone.</p>
+
+      <div class="cards" id="cards"></div>
+
+      <details class="tips">
+        <summary>Tips for reliable tracking</summary>
+        <ul>
+          <li>Shoot straight-on, in the room's real lighting, and fill the frame with the target.</li>
+          <li>Targets need texture and detail. Plain white walls or screens track badly. For the projector, project a detailed slide or photograph the projector body.</li>
+          <li>The Person target is a photo of the person's face and shoulders. Faces aren't flat, so it works best when they face the camera like they did in the photo. A printed photo they wear or hold is the most reliable option.</li>
+          <li>For mailbox #16, frame it so the number and the box around it are clearly visible.</li>
+          <li>The Face to project image is optional. If you skip it, the Person photo is used.</li>
+        </ul>
+      </details>
+
+      <div class="footer">
+        <div class="progress" id="progress"><b></b></div>
+        <div class="status" id="status"></div>
+        <button class="btn block" id="mainBtn" disabled>Add the 4 target photos</button>
+        <div class="row">
+          <button class="btn ghost sm" id="resetBtn">Clear saved calibration</button>
+        </div>
+      </div>
     </div>
-    <div class="hint">כוונו את המצלמה לכל אחד מהחפצים ובדקו את מד הזיהוי מתחת לתמונה. הוא צריך להפוך לירוק כשמכוונים לחפץ הנכון, ולהישאר אדום כשמכוונים למקום אחר. אם הוא לא מזהה, הגבירו את הרגישות. אם יש זיהויים שגויים, הנמיכו אותה.</div>
-    <div class="row">
-      <label for="arrowDir">כיוון החץ</label>
-      <select id="arrowDir">
-        <option value="down">למטה ↓</option>
-        <option value="left">שמאלה ←</option>
-        <option value="right">ימינה →</option>
-        <option value="up">למעלה ↑</option>
-      </select>
+  </section>
+
+  <!-- ===================== LOADING ===================== -->
+  <section id="loading" class="screen" hidden>
+    <div class="center">
+      <div class="spinner"></div>
+      <div id="loadingText" class="msg">Loading…</div>
     </div>
-    <div class="row">
-      <label for="codeIn">קוד הסיום</label>
-      <input type="text" id="codeIn" maxlength="6" inputmode="numeric" placeholder="472">
+  </section>
+
+  <!-- ===================== ERROR ===================== -->
+  <section id="error" class="screen" hidden>
+    <div class="center">
+      <div class="err-ico">📷</div>
+      <h2 id="errTitle" style="margin:0">Camera problem</h2>
+      <div id="errMsg" class="msg"></div>
+      <div class="row" style="width:100%;max-width:360px">
+        <button class="btn ghost" id="errBack">Back to setup</button>
+        <button class="btn" id="errRetry">Try again</button>
+      </div>
     </div>
-    <button class="big" id="startBtn" disabled>התחל משחק</button>
-    <button class="ghost hidden" id="resumeBtn">חזרה למשחק</button>
-    <button class="ghost" id="clearBtn">מחיקת כל הצילומים</button>
-  </div>
-</div>
+  </section>
 
-<!-- HUD -->
-<div id="hud" class="hidden">
-  <div id="topbar">
-    <div class="pill" id="dots"><i></i><i></i><i></i></div>
-    <div class="pill" id="timer">00:00</div>
-    <button id="skipBtn">דלג שלב</button>
-  </div>
-  <div id="confMini"><i></i><b></b></div>
-  <div id="prompt">
-    <div id="stageLabel"></div>
-    <div id="promptText"></div>
-    <div id="prog"><i></i></div>
-  </div>
-</div>
-<div id="toast"></div>
+  <!-- ===================== VICTORY ===================== -->
+  <section id="victory" class="screen" hidden>
+    <div class="center">
+      <div class="card-v">
+        <h2>🎉 You escaped!</h2>
+        <div class="time" id="finalTime"></div>
+        <button class="btn go block" id="againBtn">Play again</button>
+      </div>
+    </div>
+  </section>
 
-<!-- Win -->
-<div id="win" class="screen hidden">
-  <div class="card">
-    <div class="emoji">🎉</div>
-    <h1>ברחתם מהכיתה!</h1>
-    <p>פיענחתם את כל הרמזים. זה הקוד שפותח את הדלת:</p>
-    <div class="codeBox" id="winCode"></div>
-    <div class="stat" id="winTime"></div>
-    <button class="big" id="againBtn">משחק חדש</button>
-  </div>
-</div>
+<script type="module">
+import * as THREE from 'three';
 
-<script>
-(() => {
-'use strict';
-const $ = s => document.querySelector(s);
-const video = $('#cam'), fx = $('#fx'), ctx = fx.getContext('2d');
-
-/* ============================================================
+/* ============================================================================
    CONFIG
-   ============================================================ */
-const PW = 80;            // processing width (live frame, px)
-const BOXW = 0.72;        // calibration box width as fraction of screen width
-const BOXAR = 0.62;       // calibration box aspect (h / w)
-const SCALES = [0.6, 0.8, 1, 1.25];
+   ========================================================================== */
+const MINDAR_COMPILER_URL = 'https://cdn.jsdelivr.net/npm/mind-ar@1.2.5/dist/mindar-image.prod.js';
+const MAX_IMAGE_SIDE = 1024;          // downscale photos before compiling (speed + memory)
+const DB_NAME = 'ar-escape-room', DB_STORE = 'kv', DB_KEY = 'calibration-v1';
 
-const STUDENT_LINE = 'הצילו! אני תקוע בתוך המסך… הקוד ליציאה מהכיתה מוסתר במקום הכי קר בחדר ❄️';
-
-const STAGES = [
-  { key:'ar_ref_1', name:'המקרן בתקרה', capture:'צלמו את המקרן בתקרה',
-    find:'משהו מעליכם מתחיל לפעול… כוונו את המצלמה אל המקרן בתקרה',
-    found:'המקרן פועל! עקבו אחר האור אל מסך ההקרנה.', hold:3500, draw:drawProjector },
-  { key:'ar_ref_2', name:'התלמיד על המסך', capture:'צלמו את התלמיד על מסך ההקרנה',
-    find:'עקבו אחר החץ והפנו את המצלמה אל מסך ההקרנה',
-    found:'התלמיד שעל המסך מנסה לומר לכם משהו!', hold:6500, draw:drawStudent },
-  { key:'ar_ref_3', name:'המזגן', capture:'צלמו את המזגן',
-    find:'איפה המקום הכי קר בכיתה? מצאו את המזגן!',
-    found:'המזגן חושף את הקוד הסודי! שננו אותו…', hold:6000, draw:drawAC },
+// Target order == game order (index is also the MindAR target index)
+const TARGETS = [
+  { key:'projector', icon:'📽️', label:'Projector',       hint:'The projector screen or the projector itself, straight on.' },
+  { key:'person',    icon:'🧑', label:'Person',          hint:'Face + shoulders, front view, good light.' },
+  { key:'ac',        icon:'❄️', label:'Air conditioner', hint:'The whole AC unit, front view, vents visible.' },
+  { key:'mailbox',   icon:'📬', label:'Mailbox #16',     hint:'Close-up of mailbox 16 with the number visible.' },
 ];
+const FACE = { key:'face', icon:'🖼️', label:'Face to project', hint:'Shown on the projector in Stage 1. Defaults to the Person photo.', optional:true };
 
-/* ============================================================
-   STORAGE
-   ============================================================ */
-const ls = k => { try { return localStorage.getItem(k); } catch(e){ return null; } };
-const lsSet = (k,v) => { try { v==null ? localStorage.removeItem(k) : localStorage.setItem(k,v); return true; } catch(e){ return false; } };
+/* ============================================================================
+   STATE + HELPERS
+   ========================================================================== */
+const $ = s => document.querySelector(s);
+const state = {
+  images: {},          // key -> { dataURL, w, h }
+  mind: null,          // Uint8Array compiled tracking data
+  stage: 0,            // index of the target currently expected
+  won: false,
+  startTime: 0,
+  mindar: null,
+};
+const clamp = (v,a=0,b=1)=>Math.max(a,Math.min(b,v));
+const easeOutBack = x => { const c1=1.70158,c3=c1+1; return 1+c3*Math.pow(x-1,3)+c1*Math.pow(x-1,2); };
+const show = id => { for (const s of ['#setup','#loading','#error']) $(s).hidden = (s !== id); };
+const hideAllScreens = () => { for (const s of ['#setup','#loading','#error']) $(s).hidden = true; };
 
-let refs = STAGES.map(s => ls(s.key));
-let tpls = [null,null,null];
-let sens = ls('ar_sens') != null ? +ls('ar_sens') : 50;
-let arrowDir = ls('ar_dir') || 'down';
-let finalCode = ls('ar_code') || '472';
-
-const threshold = () => 0.75 - sens * 0.004;   // sens 0 → 0.75, 50 → 0.55, 100 → 0.35
-
-/* ============================================================
-   LAYOUT / CANVAS
-   ============================================================ */
-let sw = innerWidth, sh = innerHeight, PH = 160, dpr = 1;
-function resize(){
-  sw = innerWidth; sh = innerHeight;
-  dpr = Math.min(2, devicePixelRatio || 1);
-  fx.width = Math.round(sw*dpr); fx.height = Math.round(sh*dpr);
-  fx.style.width = sw+'px'; fx.style.height = sh+'px';
-  ctx.setTransform(dpr,0,0,dpr,0,0);
-  PH = Math.max(20, Math.round(PW * sh / sw));
-  placeGuide();
-}
-function guideRect(){
-  const w = sw * BOXW, h = w * BOXAR;
-  const panelTop = sh * 0.44;                      // panel takes up to 56vh
-  const cy = Math.max(70 + h/2, Math.min(panelTop/2 + 20, panelTop - h/2 - 34));
-  return { x:(sw-w)/2, y:cy-h/2, w, h };
-}
-function placeGuide(){
-  const g = guideRect(), el = $('#guide');
-  Object.assign(el.style, { left:g.x+'px', top:g.y+'px', width:g.w+'px', height:g.h+'px' });
-}
-addEventListener('resize', resize);
-addEventListener('orientationchange', () => setTimeout(resize, 300));
-
-function coverMap(){
-  const vw = video.videoWidth, vh = video.videoHeight;
-  const s = Math.max(sw/vw, sh/vh);
-  return { s, ox:(sw - vw*s)/2, oy:(sh - vh*s)/2 };
-}
-
-/* ============================================================
-   CAMERA
-   ============================================================ */
-let stream = null;
-async function startCamera(){
-  if (stream) return true;
-  if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia){
-    throw new Error('הדפדפן לא מאפשר גישה למצלמה. צריך לפתוח את הקובץ דרך כתובת https (למשל GitHub Pages או Netlify) בכרום או בספארי.');
-  }
-  stream = await navigator.mediaDevices.getUserMedia({
-    audio:false,
-    video:{ facingMode:{ ideal:'environment' }, width:{ ideal:1280 }, height:{ ideal:720 } }
-  });
-  video.srcObject = stream;
-  await video.play().catch(()=>{});
-  await new Promise(r => { if (video.videoWidth) r(); else video.onloadedmetadata = () => r(); });
-  return true;
-}
-
-/* ============================================================
-   VISION ENGINE
-   Multi-scale normalized cross-correlation on grayscale + gradient
-   magnitude, fused with a coarse RGB histogram similarity.
-   ============================================================ */
-const midC = document.createElement('canvas'), midX = midC.getContext('2d', { willReadFrequently:true });
-const smC  = document.createElement('canvas'), smX  = smC.getContext('2d',  { willReadFrequently:true });
-
-// two-step downscale (reduces aliasing) → returns ImageData.data
-function sample(src, sx, sy, sW, sH, w, h){
-  const mw = w*4, mh = h*4;
-  midC.width = mw; midC.height = mh;
-  midX.imageSmoothingEnabled = true; midX.imageSmoothingQuality = 'high';
-  midX.drawImage(src, sx, sy, sW, sH, 0, 0, mw, mh);
-  smC.width = w; smC.height = h;
-  smX.imageSmoothingEnabled = true; smX.imageSmoothingQuality = 'high';
-  smX.drawImage(midC, 0, 0, mw, mh, 0, 0, w, h);
-  return smX.getImageData(0, 0, w, h).data;
-}
-
-function feats(d, w, h){
-  const n = w*h, g = new Float32Array(n), e = new Float32Array(n);
-  for (let i=0, j=0; i<n; i++, j+=4) g[i] = 0.299*d[j] + 0.587*d[j+1] + 0.114*d[j+2];
-  for (let y=0; y<h; y++){
-    const ym = y>0 ? y-1 : 0, yp = y<h-1 ? y+1 : h-1;
-    for (let x=0; x<w; x++){
-      const xm = x>0 ? x-1 : 0, xp = x<w-1 ? x+1 : w-1;
-      const dx = g[y*w+xp] - g[y*w+xm], dy = g[yp*w+x] - g[ym*w+x];
-      e[y*w+x] = Math.sqrt(dx*dx + dy*dy);
-    }
-  }
-  return { w, h, g, e, d };
-}
-function integral(a, w, h){
-  const W = w+1, S = new Float64Array(W*(h+1)), Q = new Float64Array(W*(h+1));
-  for (let y=0; y<h; y++){
-    let rs = 0, rq = 0;
-    for (let x=0; x<w; x++){
-      const v = a[y*w+x]; rs += v; rq += v*v;
-      S[(y+1)*W + x+1] = S[y*W + x+1] + rs;
-      Q[(y+1)*W + x+1] = Q[y*W + x+1] + rq;
-    }
-  }
-  return { S, Q, W };
-}
-function rectVar(I, x, y, w, h, n){
-  const W = I.W, a = y*W + x, b = a + w, c = (y+h)*W + x, d = c + w;
-  const s = I.S[d] - I.S[b] - I.S[c] + I.S[a];
-  const q = I.Q[d] - I.Q[b] - I.Q[c] + I.Q[a];
-  return q - s*s/n;
-}
-function zeroMean(a){ let m=0; for (let i=0;i<a.length;i++) m+=a[i]; m/=a.length; let s=0; for (let i=0;i<a.length;i++){ a[i]-=m; s+=a[i]*a[i]; } return s; }
-function hist(d, w, x0, y0, tw, th, st){
-  const H = new Float32Array(64); let n = 0;
-  for (let y=y0; y<y0+th; y+=st) for (let x=x0; x<x0+tw; x+=st){
-    const j = (y*w + x)*4; H[(d[j]>>6)*16 + (d[j+1]>>6)*4 + (d[j+2]>>6)]++; n++;
-  }
-  for (let i=0;i<64;i++) H[i] /= (n||1);
-  return H;
-}
-function bhatta(a, b){ let s=0; for (let i=0;i<64;i++) s += Math.sqrt(a[i]*b[i]); return s; }
-
-function buildTemplate(img){
-  const tw0 = Math.round(PW * BOXW), ar = img.naturalHeight / img.naturalWidth;
-  const out = []; let h0 = null;
-  for (const s of SCALES){
-    const w = Math.round(tw0*s), h = Math.round(tw0*ar*s);
-    if (w < 10 || h < 8) continue;
-    const d = sample(img, 0, 0, img.naturalWidth, img.naturalHeight, w, h);
-    const f = feats(d, w, h);
-    const ng = zeroMean(f.g), ne = zeroMean(f.e);
-    out.push({ w, h, g:f.g, e:f.e, ng, ne });
-    if (s === 1) h0 = hist(d, w, 0, 0, w, h, 1);
-  }
-  return { s:out, hist:h0 };
-}
-function loadTemplate(i){
-  tpls[i] = null;
-  if (!refs[i]) return Promise.resolve();
-  return new Promise(res => {
+function loadImage(src){
+  return new Promise((res, rej) => {
     const img = new Image();
-    img.onload = () => { tpls[i] = buildTemplate(img); res(); };
-    img.onerror = () => res();
-    img.src = refs[i];
+    img.crossOrigin = 'anonymous';
+    img.onload = () => res(img);
+    img.onerror = () => rej(new Error('Could not read that image.'));
+    img.src = src;
   });
 }
 
-function grabLive(){
-  if (!video.videoWidth) return null;
-  const m = coverMap();
-  const d = sample(video, -m.ox/m.s, -m.oy/m.s, sw/m.s, sh/m.s, PW, PH);
-  const L = feats(d, PW, PH);
-  L.Ig = integral(L.g, PW, PH);
-  L.Ie = integral(L.e, PW, PH);
-  return L;
-}
-
-function ncc(L, t, x, y, n){
-  const W = L.w, G = L.g, E = L.e, tg = t.g, te = t.e, tw = t.w;
-  let sg = 0, se = 0;
-  for (let j=0; j<t.h; j++){
-    let li = (y+j)*W + x, ti = j*tw; const end = ti + tw;
-    while (ti < end){ sg += tg[ti]*G[li]; se += te[ti]*E[li]; ti++; li++; }
-  }
-  const vg = rectVar(L.Ig, x, y, t.w, t.h, n), ve = rectVar(L.Ie, x, y, t.w, t.h, n);
-  const a = (vg > n*16 && t.ng > n*16) ? sg / Math.sqrt(vg * t.ng) : 0;
-  const b = (ve > n*9  && t.ne > n*9 ) ? se / Math.sqrt(ve * t.ne) : 0;
-  return 0.5*a + 0.5*b;
-}
-
-function match(L, T, step){
-  let best = null, bs = -2;
-  for (const t of T.s){
-    if (t.w > L.w || t.h > L.h) continue;
-    const n = t.w*t.h;
-    for (let y=0; y<=L.h-t.h; y+=step)
-      for (let x=0; x<=L.w-t.w; x+=step){
-        const s = ncc(L, t, x, y, n);
-        if (s > bs){ bs = s; best = { x, y, t }; }
-      }
-  }
-  if (!best) return { conf:0 };
-  const t = best.t, n = t.w*t.h, x0 = best.x, y0 = best.y;
-  for (let dy=1-step; dy<step; dy++) for (let dx=1-step; dx<step; dx++){
-    const x = x0+dx, y = y0+dy;
-    if ((!dx && !dy) || x<0 || y<0 || x>L.w-t.w || y>L.h-t.h) continue;
-    const s = ncc(L, t, x, y, n);
-    if (s > bs){ bs = s; best = { x, y, t }; }
-  }
-  const hb = T.hist ? bhatta(hist(L.d, L.w, best.x, best.y, best.t.w, best.t.h, 2), T.hist) : 0.5;
-  const conf = 0.78*Math.max(0, bs) + 0.22*Math.min(1, Math.max(0, (hb-0.45)/0.5));
-  return { conf, x:best.x, y:best.y, t:best.t };
-}
-
-/* ============================================================
-   AUDIO / HAPTICS
-   ============================================================ */
-let AC = null;
-function tone(f=880, d=0.12, type='sine', v=0.12, delay=0){
+/** Read a picked/captured file, fix size, return {dataURL,w,h}. */
+async function fileToImage(file){
+  const url = URL.createObjectURL(file);
   try{
-    AC = AC || new (window.AudioContext || window.webkitAudioContext)();
-    const t0 = AC.currentTime + delay, o = AC.createOscillator(), g = AC.createGain();
-    o.type = type; o.frequency.setValueAtTime(f, t0);
-    g.gain.setValueAtTime(v, t0); g.gain.exponentialRampToValueAtTime(0.0001, t0+d);
-    o.connect(g).connect(AC.destination); o.start(t0); o.stop(t0+d+0.02);
-  }catch(e){}
-}
-const buzz = p => { try{ navigator.vibrate && navigator.vibrate(p); }catch(e){} };
-const sfxFound = () => { tone(660,.12,'triangle'); tone(990,.18,'triangle',.12,.1); buzz(60); };
-const sfxStage = () => { [523,659,784,1046].forEach((f,i)=>tone(f,.18,'triangle',.12,i*.09)); buzz([80,40,80]); };
-const sfxWin   = () => { [523,659,784,1046,784,1046,1318].forEach((f,i)=>tone(f,.22,'square',.06,i*.11)); buzz([100,50,100,50,200]); };
-
-/* ============================================================
-   UI STATE
-   ============================================================ */
-let mode = 'splash';    // splash | setup | intro | game | win
-let G = null;           // game state
-let retakeIdx = -1;
-let wakeLock = null;
-
-function show(id, on){ $(id).classList.toggle('hidden', !on); }
-function setMode(m){
-  mode = m;
-  show('#splash', m==='splash'); show('#setup', m==='setup'); show('#intro', m==='intro');
-  show('#hud', m==='game'); show('#win', m==='win');
-  show('#gearBtn', m!=='splash' && m!=='setup');
-  if (m==='setup') refreshSetup();
-  if (m==='game'){ try{ navigator.wakeLock && navigator.wakeLock.request('screen').then(w=>wakeLock=w).catch(()=>{}); }catch(e){} }
+    const img = await loadImage(url);   // modern browsers apply EXIF orientation automatically
+    const s = Math.min(1, MAX_IMAGE_SIDE / Math.max(img.naturalWidth, img.naturalHeight));
+    const w = Math.round(img.naturalWidth * s), h = Math.round(img.naturalHeight * s);
+    const c = document.createElement('canvas'); c.width = w; c.height = h;
+    c.getContext('2d').drawImage(img, 0, 0, w, h);
+    return { dataURL: c.toDataURL('image/jpeg', 0.9), w, h };
+  } finally { URL.revokeObjectURL(url); }
 }
 
-/* ---------- Setup ---------- */
-const cardsEl = $('#cards');
-STAGES.forEach((s,i) => {
-  const c = document.createElement('div');
-  c.className = 'tcard'; c.dataset.i = i;
-  c.innerHTML = `<div class="thumb">${i+1}</div><div class="tname">${s.name}</div>
-    <button class="retake">צלם שוב</button><div class="meter"><i></i></div><div class="mval">–</div>`;
-  c.querySelector('.retake').onclick = () => { retakeIdx = i; refreshSetup(); };
-  cardsEl.appendChild(c);
+/* --- tiny IndexedDB wrapper (calibration survives reloads) --- */
+const db = {
+  open(){ return new Promise((res, rej) => {
+    const r = indexedDB.open(DB_NAME, 1);
+    r.onupgradeneeded = () => r.result.createObjectStore(DB_STORE);
+    r.onsuccess = () => res(r.result); r.onerror = () => rej(r.error);
+  }); },
+  async op(mode, fn){ const d = await this.open(); return new Promise((res, rej) => {
+    const st = d.transaction(DB_STORE, mode).objectStore(DB_STORE); const r = fn(st);
+    r.onsuccess = () => res(r.result); r.onerror = () => rej(r.error);
+  }); },
+  get(k){ return this.op('readonly', s => s.get(k)); },
+  set(k,v){ return this.op('readwrite', s => s.put(v,k)); },
+  del(k){ return this.op('readwrite', s => s.delete(k)); },
+};
+
+/* --- WebAudio: unlock chime + firework pops (no audio files needed) --- */
+const sfx = {
+  ctx: null,
+  init(){ try{ this.ctx = this.ctx || new (window.AudioContext || window.webkitAudioContext)(); this.ctx.resume?.(); }catch(e){} },
+  chime(base = 523){
+    const c = this.ctx; if (!c) return;
+    [0, 4, 7, 12].forEach((semi, i) => {
+      const o = c.createOscillator(), g = c.createGain(), t = c.currentTime + i * 0.09;
+      o.type = 'sine'; o.frequency.value = base * Math.pow(2, semi / 12);
+      g.gain.setValueAtTime(0, t); g.gain.linearRampToValueAtTime(0.18, t + 0.02); g.gain.exponentialRampToValueAtTime(0.001, t + 0.9);
+      o.connect(g).connect(c.destination); o.start(t); o.stop(t + 1);
+    });
+  },
+  pop(){
+    const c = this.ctx; if (!c) return;
+    const len = 0.6, buf = c.createBuffer(1, c.sampleRate * len, c.sampleRate), d = buf.getChannelData(0);
+    for (let i = 0; i < d.length; i++) d[i] = (Math.random() * 2 - 1) * Math.pow(1 - i / d.length, 3);
+    const s = c.createBufferSource(), f = c.createBiquadFilter(), g = c.createGain();
+    s.buffer = buf; f.type = 'lowpass'; f.frequency.value = 900 + Math.random() * 1200; g.gain.value = 0.35;
+    s.connect(f).connect(g).connect(c.destination); s.start();
+  },
+};
+const buzz = p => { try{ navigator.vibrate?.(p); }catch(e){} };
+
+/* ============================================================================
+   SETUP / CALIBRATION UI
+   ========================================================================== */
+function renderCards(){
+  const list = $('#cards'); list.innerHTML = '';
+  [...TARGETS, FACE].forEach((t, i) => {
+    const img = state.images[t.key];
+    const card = document.createElement('div');
+    card.className = 'card' + (img ? ' ready' : '');
+    card.innerHTML = `
+      <div class="thumb">${img ? `<img alt="" src="${img.dataURL}">` : t.icon}</div>
+      <div class="meta">
+        <div class="ttl">${t.optional ? '' : (i + 1) + ' · '}${t.label}${t.optional ? '<em>optional</em>' : ''}</div>
+        <div class="hint">${t.hint}</div>
+        <div class="actions">
+          <label class="btn sm">📷 Camera<input class="vh" type="file" accept="image/*" capture="environment"></label>
+          <label class="btn sm ghost">🖼️ Gallery<input class="vh" type="file" accept="image/*"></label>
+        </div>
+      </div>
+      <div class="check">✓</div>`;
+    card.querySelectorAll('input').forEach(inp => inp.addEventListener('change', async e => {
+      const f = e.target.files?.[0]; e.target.value = '';
+      if (!f) return;
+      try{
+        setStatus('Processing photo…');
+        state.images[t.key] = await fileToImage(f);
+        if (!t.optional) state.mind = null;   // a target changed → must recompile
+        else if (state.mind) persist();       // face change only → just save
+        setStatus('');
+        renderCards(); updateMainBtn();
+      }catch(err){ setStatus(err.message, 'err'); }
+    }));
+    list.appendChild(card);
+  });
+}
+
+function setStatus(msg, cls = ''){ const s = $('#status'); s.textContent = msg; s.className = 'status ' + cls; }
+function setProgress(p){ const el = $('#progress'); el.classList.toggle('on', p != null); el.firstElementChild.style.width = (p || 0) + '%'; }
+
+function updateMainBtn(){
+  const n = TARGETS.filter(t => state.images[t.key]).length;
+  const b = $('#mainBtn');
+  b.classList.toggle('go', !!state.mind);
+  if (state.mind){ b.disabled = false; b.textContent = '▶ Start Game'; }
+  else if (n < 4){ b.disabled = true; b.textContent = `Add the 4 target photos (${n}/4)`; }
+  else { b.disabled = false; b.textContent = '🧠 Calibrate targets'; }
+}
+
+async function persist(){
+  try{ await db.set(DB_KEY, { images: state.images, mind: state.mind }); }
+  catch(e){ console.warn('Could not save calibration', e); }
+}
+
+/** Compile the 4 photos into a MindAR tracking file, entirely on-device. */
+async function calibrate(){
+  const b = $('#mainBtn'); b.disabled = true; b.textContent = 'Calibrating…';
+  setStatus('Loading the image compiler…'); setProgress(0);
+  try{
+    let Compiler;
+    try{
+      const mod = await import(MINDAR_COMPILER_URL);
+      Compiler = mod?.Compiler || window.MINDAR?.IMAGE?.Compiler;
+    }catch(e){ Compiler = window.MINDAR?.IMAGE?.Compiler; }
+    if (!Compiler) throw new Error('Could not load the MindAR compiler. Check your internet connection and try again.');
+
+    const imgs = await Promise.all(TARGETS.map(t => loadImage(state.images[t.key].dataURL)));
+    const compiler = new Compiler();
+    setStatus('Learning targets… keep this screen open');
+    await compiler.compileImageTargets(imgs, p => setProgress(p));
+    const data = await compiler.exportData();
+    state.mind = data instanceof Uint8Array ? data : new Uint8Array(data);
+    await persist();
+    setStatus('Calibrated ✓ Targets saved on this phone.', 'ok');
+  }catch(err){
+    console.error(err);
+    setStatus('Calibration failed: ' + (err?.message || err), 'err');
+  }finally{
+    setProgress(null); updateMainBtn();
+  }
+}
+
+/* ============================================================================
+   2D OVERLAY EFFECTS — snow + pseudo-3D fireworks (shared rAF loop)
+   ========================================================================== */
+const DPR = Math.min(2, window.devicePixelRatio || 1);
+function fitCanvas(c){ c.width = innerWidth * DPR; c.height = innerHeight * DPR; c.style.width = innerWidth + 'px'; c.style.height = innerHeight + 'px'; c.getContext('2d').setTransform(DPR, 0, 0, DPR, 0, 0); }
+const snowC = $('#snow'), fxC = $('#fx');
+const snowX = snowC.getContext('2d'), fxX = fxC.getContext('2d');
+[snowC, fxC].forEach(fitCanvas);
+addEventListener('resize', () => [snowC, fxC].forEach(fitCanvas));
+
+/* ---- Snow ---- */
+const snow = { alpha: 0, target: 0, flakes: [] };
+function makeFlake(randomY = true){
+  const z = Math.random();                       // 0 = far, 1 = near
+  return { x: Math.random() * innerWidth, y: randomY ? Math.random() * innerHeight : -20,
+           z, r: 1 + z * 3.6, vy: 25 + z * 75, sway: Math.random() * 6.28, sw: 10 + Math.random() * 25 };
+}
+for (let i = 0; i < 190; i++) snow.flakes.push(makeFlake());
+function drawSnow(dt, t){
+  snow.alpha += (snow.target - snow.alpha) * Math.min(1, dt * 0.8);
+  snowX.clearRect(0, 0, innerWidth, innerHeight);
+  if (snow.alpha < 0.01) return;
+  for (const f of snow.flakes){
+    f.y += f.vy * dt;
+    f.x += Math.sin(t * 1.2 + f.sway) * f.sw * dt;
+    if (f.y > innerHeight + 10) Object.assign(f, makeFlake(false));
+    snowX.globalAlpha = snow.alpha * (0.35 + f.z * 0.6);
+    snowX.fillStyle = '#fff';
+    snowX.beginPath(); snowX.arc(f.x, f.y, f.r, 0, 6.283); snowX.fill();
+  }
+  snowX.globalAlpha = 1;
+}
+function setCold(on){
+  document.body.classList.toggle('cold', on);
+  snow.target = on ? 1 : 0;
+}
+
+/* ---- Fireworks: each shell is a 3D sphere of particles projected to screen ---- */
+const fw = { on: false, rockets: [], parts: [], flashes: [], next: 0, t0: 0 };
+function fwLaunch(){
+  const W = innerWidth, H = innerHeight;
+  fw.rockets.push({ x: W * (0.12 + Math.random() * 0.76), y: H + 10, vx: (Math.random() - .5) * 80,
+                    vy: -(H * (0.95 + Math.random() * 0.35)), ty: H * (0.12 + Math.random() * 0.38),
+                    hue: Math.random() * 360, px: 0, py: 0 });
+}
+function fwExplode(r){
+  const n = 110 + (Math.random() * 70 | 0), S = Math.min(innerWidth, innerHeight) * (0.38 + Math.random() * 0.18);
+  const type = Math.random(), hue2 = (r.hue + 120 + Math.random() * 90) % 360;
+  for (let i = 0; i < n; i++){
+    const th = Math.random() * 6.283, ph = Math.acos(2 * Math.random() - 1);
+    let dx = Math.sin(ph) * Math.cos(th), dy = Math.sin(ph) * Math.sin(th), dz = Math.cos(ph);
+    if (type < 0.25){ dz *= 0.15; }                                   // ring shell
+    const sp = S * (type > 0.75 ? (i % 2 ? 1 : 0.55) : 0.85 + Math.random() * 0.15); // double shell
+    fw.parts.push({ cx: r.x, cy: r.y, ox: 0, oy: 0, oz: 0, vx: dx * sp, vy: dy * sp, vz: dz * sp,
+                    life: 0, max: 1.4 + Math.random() * 0.8, hue: (type > 0.75 && i % 2) ? hue2 : r.hue, px: r.x, py: r.y });
+  }
+  fw.flashes.push({ x: r.x, y: r.y, life: 0, hue: r.hue });
+  sfx.pop(); buzz(25);
+}
+function drawFireworks(dt, t){
+  fxX.clearRect(0, 0, innerWidth, innerHeight);
+  if (!fw.on && !fw.rockets.length && !fw.parts.length) return;
+  const H = innerHeight, F = Math.min(innerWidth, H) * 1.3;
+  if (fw.on && t >= fw.next){
+    fwLaunch(); if (Math.random() < .35) fwLaunch();
+    const elapsed = t - fw.t0;
+    fw.next = t + (elapsed < 10 ? 0.35 + Math.random() * 0.35 : 0.9 + Math.random() * 1.1);
+  }
+  fxX.globalCompositeOperation = 'lighter';
+  // rockets
+  for (let i = fw.rockets.length - 1; i >= 0; i--){
+    const r = fw.rockets[i]; r.px = r.x; r.py = r.y;
+    r.vy += H * 0.55 * dt; r.x += r.vx * dt; r.y += r.vy * dt;
+    fxX.strokeStyle = `hsla(${r.hue},100%,75%,.9)`; fxX.lineWidth = 2.5;
+    fxX.beginPath(); fxX.moveTo(r.px, r.py + 14); fxX.lineTo(r.x, r.y); fxX.stroke();
+    if (r.y <= r.ty || r.vy > -60){ fwExplode(r); fw.rockets.splice(i, 1); }
+  }
+  // flashes
+  for (let i = fw.flashes.length - 1; i >= 0; i--){
+    const f = fw.flashes[i]; f.life += dt; const a = 1 - f.life / 0.35;
+    if (a <= 0){ fw.flashes.splice(i, 1); continue; }
+    const g = fxX.createRadialGradient(f.x, f.y, 0, f.x, f.y, 140);
+    g.addColorStop(0, `hsla(${f.hue},100%,85%,${0.55 * a})`); g.addColorStop(1, 'hsla(0,0%,0%,0)');
+    fxX.fillStyle = g; fxX.fillRect(f.x - 140, f.y - 140, 280, 280);
+  }
+  // particles (3D → 2D perspective projection)
+  for (let i = fw.parts.length - 1; i >= 0; i--){
+    const p = fw.parts[i]; p.life += dt;
+    if (p.life >= p.max){ fw.parts.splice(i, 1); continue; }
+    const drag = Math.exp(-1.7 * dt);
+    p.vx *= drag; p.vy *= drag; p.vz *= drag; p.vy += H * 0.18 * dt;
+    p.ox += p.vx * dt; p.oy += p.vy * dt; p.oz += p.vz * dt;
+    const s = F / (F + p.oz), sx = p.cx + p.ox * s, sy = p.cy + p.oy * s;
+    const k = 1 - p.life / p.max, tw = 0.7 + 0.3 * Math.sin(t * 30 + i);
+    fxX.strokeStyle = `hsla(${p.hue},100%,${60 + 25 * k}%,${k * tw})`;
+    fxX.lineWidth = Math.max(0.6, 2.6 * s);
+    fxX.beginPath(); fxX.moveTo(p.px, p.py); fxX.lineTo(sx, sy); fxX.stroke();
+    p.px = sx; p.py = sy;
+  }
+  fxX.globalCompositeOperation = 'source-over';
+}
+function startFireworks(){ fw.on = true; fw.t0 = performance.now() / 1000; fw.next = 0; for (let i = 0; i < 3; i++) fwLaunch(); }
+function stopFireworks(){ fw.on = false; fw.rockets.length = 0; fw.parts.length = 0; fw.flashes.length = 0; }
+
+let lastT = performance.now();
+(function overlayLoop(now){
+  const dt = Math.min(0.05, (now - lastT) / 1000); lastT = now; const t = now / 1000;
+  drawSnow(dt, t); drawFireworks(dt, t);
+  if (state.startTime && !state.won) $('#timer').textContent = fmtTime(Date.now() - state.startTime);
+  requestAnimationFrame(overlayLoop);
+})(performance.now());
+const fmtTime = ms => { const s = Math.floor(ms / 1000); return String(Math.floor(s / 60)).padStart(2, '0') + ':' + String(s % 60).padStart(2, '0'); };
+
+/* ============================================================================
+   3D CONTENT FACTORIES (procedural: no external models to download)
+   Anchor space: target image width = 1 unit, height = aspect (h/w), +Z toward viewer.
+   ========================================================================== */
+function canvasTex(w, h, draw){
+  const c = document.createElement('canvas'); c.width = w; c.height = h;
+  draw(c.getContext('2d'), w, h);
+  const t = new THREE.CanvasTexture(c); t.colorSpace = THREE.SRGBColorSpace; return t;
+}
+const dotTex = canvasTex(64, 64, (g, w) => {
+  const r = g.createRadialGradient(w/2, w/2, 0, w/2, w/2, w/2);
+  r.addColorStop(0, 'rgba(255,255,255,1)'); r.addColorStop(.35, 'rgba(255,255,255,.6)'); r.addColorStop(1, 'rgba(255,255,255,0)');
+  g.fillStyle = r; g.fillRect(0, 0, w, w);
+});
+function textSprite(text, { font = 'bold 380px system-ui, sans-serif', size = 512, fill, glow = '#5cc8ff', scale = 0.5 } = {}){
+  const tex = canvasTex(size, size, (g, w, h) => {
+    g.textAlign = 'center'; g.textBaseline = 'middle'; g.font = font;
+    g.shadowColor = glow; g.shadowBlur = 40;
+    if (fill === 'gradient'){
+      const gr = g.createLinearGradient(0, h * .2, 0, h * .8); gr.addColorStop(0, '#ffffff'); gr.addColorStop(1, '#8fdcff'); g.fillStyle = gr;
+    } else g.fillStyle = fill || '#fff';
+    g.fillText(text, w / 2, h / 2 + size * 0.03);
+    g.shadowBlur = 0; g.fillText(text, w / 2, h / 2 + size * 0.03);
+  });
+  const sp = new THREE.Sprite(new THREE.SpriteMaterial({ map: tex, transparent: true, depthWrite: false }));
+  sp.scale.set(scale, scale, 1); return sp;
+}
+
+/* ---- Stage 1: face appears on the projector ---- */
+function buildProjector(aspect){
+  const g = new THREE.Group();
+  const face = state.images.face || state.images.person;
+  const faceAspect = face.h / face.w;
+  let w = 1, h = faceAspect; if (h > aspect){ h = aspect; w = aspect / faceAspect; }
+  w *= 0.94; h *= 0.94;
+
+  const tex = new THREE.TextureLoader().load(face.dataURL); tex.colorSpace = THREE.SRGBColorSpace;
+  const faceMat = new THREE.MeshBasicMaterial({ map: tex, transparent: true, opacity: 0 });
+  const plane = new THREE.Mesh(new THREE.PlaneGeometry(w, h), faceMat); plane.position.z = 0.01; g.add(plane);
+
+  // projector-beam glow behind the face
+  const glowMat = new THREE.MeshBasicMaterial({ map: dotTex, color: 0x9fdcff, transparent: true, opacity: 0, blending: THREE.AdditiveBlending, depthWrite: false });
+  const glow = new THREE.Mesh(new THREE.PlaneGeometry(w * 1.6, h * 1.6), glowMat); glow.position.z = 0.005; g.add(glow);
+
+  // moving scan-lines for a "projected" look
+  const lines = canvasTex(4, 64, (c, W, H) => { for (let y = 0; y < H; y += 4){ c.fillStyle = 'rgba(255,255,255,.18)'; c.fillRect(0, y, W, 1); } });
+  lines.wrapS = lines.wrapT = THREE.RepeatWrapping; lines.repeat.set(1, 6);
+  const lineMat = new THREE.MeshBasicMaterial({ map: lines, transparent: true, opacity: 0, blending: THREE.AdditiveBlending, depthWrite: false });
+  const lineMesh = new THREE.Mesh(new THREE.PlaneGeometry(w, h), lineMat); lineMesh.position.z = 0.015; g.add(lineMesh);
+
+  g.userData.update = (t, dt, age) => {
+    const boot = clamp(age / 1.4);
+    const glitch = age < 1.4 ? (Math.random() < 0.35 ? 0.15 : 1) : (0.94 + 0.06 * Math.sin(t * 50));
+    faceMat.opacity = boot * glitch;
+    lineMat.opacity = 0.5 * boot;
+    glowMat.opacity = 0.35 * boot * (0.85 + 0.15 * Math.sin(t * 3));
+    lines.offset.y -= dt * 0.4;
+    plane.position.x = age < 1.4 && Math.random() < 0.2 ? (Math.random() - .5) * 0.03 : 0;
+  };
+  return g;
+}
+
+/* ---- Stage 2: knitted scarf on the person ---- */
+function knitTex(horizontal){
+  const t = canvasTex(256, 256, (g, w, h) => {
+    const cols = ['#c8102e', '#f3ead8', '#c8102e', '#1d3557'];
+    const bands = 8, bw = (horizontal ? h : w) / bands;
+    for (let i = 0; i < bands; i++){ g.fillStyle = cols[i % cols.length]; horizontal ? g.fillRect(0, i * bw, w, bw) : g.fillRect(i * bw, 0, bw, h); }
+    // knit "V" stitches
+    g.strokeStyle = 'rgba(0,0,0,.18)'; g.lineWidth = 2;
+    for (let y = 0; y < h; y += 12) for (let x = 0; x < w; x += 12){
+      g.beginPath(); g.moveTo(x, y); g.lineTo(x + 6, y + 9); g.lineTo(x + 12, y); g.stroke();
+    }
+  });
+  t.wrapS = t.wrapT = THREE.RepeatWrapping; return t;
+}
+function buildScarf(aspect){
+  const g = new THREE.Group();
+  const scarf = new THREE.Group();
+  scarf.position.set(0, -aspect * 0.40, 0.02);       // neck sits low in a face+shoulders photo
+  g.add(scarf);
+
+  const ringTex = knitTex(false); ringTex.repeat.set(4, 1);
+  const ringMat = new THREE.MeshStandardMaterial({ map: ringTex, roughness: 0.95, metalness: 0 });
+
+  // invisible "neck" occluder hides the back half of the scarf behind the person
+  const occ = new THREE.Mesh(new THREE.CylinderGeometry(0.15, 0.17, 0.6, 24), new THREE.MeshBasicMaterial({ colorWrite: false }));
+  occ.renderOrder = -1; occ.position.set(0, 0.02, -0.02); scarf.add(occ);
+
+  for (let i = 0; i < 2; i++){
+    const ring = new THREE.Mesh(new THREE.TorusGeometry(0.205 + i * 0.012, 0.07, 18, 56), ringMat);
+    ring.rotation.x = 1.15 + i * 0.12; ring.rotation.z = i * 0.25;
+    ring.scale.set(1.18, 1.0, 1.0);
+    ring.position.y = -i * 0.07;
+    scarf.add(ring);
+  }
+  // hanging tails with fringe
+  const tailMat = new THREE.MeshStandardMaterial({ map: knitTex(true), roughness: 0.95 });
+  const fringeMat = new THREE.MeshStandardMaterial({ color: 0xf3ead8, roughness: 1 });
+  const tails = [];
+  [[-0.07, 0.42, 0.14], [0.05, 0.34, -0.1]].forEach(([x, len, rot], i) => {
+    const pivot = new THREE.Group(); pivot.position.set(x, -0.1, 0.2 + i * 0.015); pivot.rotation.z = rot;
+    const geo = new THREE.BoxGeometry(0.13, len, 0.035); geo.translate(0, -len / 2, 0);
+    pivot.add(new THREE.Mesh(geo, tailMat));
+    for (let f = 0; f < 6; f++){
+      const fr = new THREE.Mesh(new THREE.BoxGeometry(0.012, 0.05, 0.012), fringeMat);
+      fr.position.set(-0.055 + f * 0.022, -len - 0.025, 0); pivot.add(fr);
+    }
+    scarf.add(pivot); tails.push(pivot);
+  });
+
+  g.userData.update = (t, dt, age) => {
+    const k = clamp(age / 0.8);
+    scarf.scale.setScalar(Math.max(0.001, easeOutBack(k)));
+    tails.forEach((p, i) => { p.rotation.z = (i ? -0.1 : 0.14) + Math.sin(t * 2.2 + i) * 0.06; p.rotation.x = Math.sin(t * 1.7 + i) * 0.05; });
+  };
+  return g;
+}
+
+/* ---- Stage 3: AC airflow + ✉️ + "16" ---- */
+function buildAC(aspect){
+  const g = new THREE.Group();
+  const ventY = -aspect / 2 + 0.03;
+
+  // 3D wind ribbons flowing out of the vents
+  const dash = canvasTex(256, 8, (c, w, h) => {
+    const gr = c.createLinearGradient(0, 0, w, 0);
+    gr.addColorStop(0, 'rgba(200,240,255,0)'); gr.addColorStop(.5, 'rgba(200,240,255,1)'); gr.addColorStop(1, 'rgba(200,240,255,0)');
+    c.fillStyle = gr; c.fillRect(0, 0, w, h);
+  });
+  dash.wrapS = THREE.RepeatWrapping; dash.repeat.set(2.5, 1);
+  const ribbonMat = new THREE.MeshBasicMaterial({ map: dash, transparent: true, opacity: 0, blending: THREE.AdditiveBlending, depthWrite: false, side: THREE.DoubleSide });
+  for (let i = 0; i < 7; i++){
+    const x = -0.42 + i * 0.14, dx = (Math.random() - .5) * 0.25;
+    const curve = new THREE.CatmullRomCurve3([
+      new THREE.Vector3(x, ventY, 0.02),
+      new THREE.Vector3(x + dx * 0.3, ventY - 0.15, 0.22),
+      new THREE.Vector3(x + dx * 0.7, ventY - 0.42, 0.42),
+      new THREE.Vector3(x + dx, ventY - 0.8, 0.55),
+    ]);
+    g.add(new THREE.Mesh(new THREE.TubeGeometry(curve, 40, 0.008 + Math.random() * 0.006, 6, false), ribbonMat));
+  }
+
+  // cold-air particles
+  const N = 500, pos = new Float32Array(N * 3), data = [];
+  const spawn = (i, initial) => {
+    data[i] = { life: initial ? Math.random() * 1.6 : 0, max: 1.2 + Math.random() * 0.8, sp: 0.35 + Math.random() * 0.35, ph: Math.random() * 6.28 };
+    pos[i*3] = -0.46 + Math.random() * 0.92; pos[i*3+1] = ventY; pos[i*3+2] = 0.02;
+  };
+  for (let i = 0; i < N; i++) spawn(i, true);
+  const pGeo = new THREE.BufferGeometry(); pGeo.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+  const pMat = new THREE.PointsMaterial({ size: 0.035, map: dotTex, color: 0xcdeeff, transparent: true, opacity: 0, depthWrite: false, blending: THREE.AdditiveBlending });
+  g.add(new THREE.Points(pGeo, pMat));
+
+  // floating mail emoji above the AC
+  const mail = textSprite('✉️', { font: '330px "Apple Color Emoji","Segoe UI Emoji","Noto Color Emoji",sans-serif', glow: '#ffffff', scale: 0.42 });
+  mail.position.set(0, aspect / 2 + 0.3, 0.1); g.add(mail);
+
+  // big "16" next to the AC
+  const num = textSprite('16', { fill: 'gradient', glow: '#5cc8ff', scale: 0.75 });
+  num.position.set(0.5 + 0.38, 0, 0.12); g.add(num);
+
+  g.userData.update = (t, dt, age) => {
+    const k = clamp(age / 1.2);
+    ribbonMat.opacity = 0.75 * k; pMat.opacity = 0.85 * k;
+    dash.offset.x -= dt * 0.9;
+    for (let i = 0; i < N; i++){
+      const d = data[i]; d.life += dt;
+      if (d.life > d.max){ spawn(i, false); continue; }
+      pos[i*3]   += Math.sin(d.ph + t * 3) * 0.04 * dt;
+      pos[i*3+1] -= d.sp * dt * 0.75;
+      pos[i*3+2] += d.sp * dt * 0.55;
+    }
+    pGeo.attributes.position.needsUpdate = true;
+    const pop = easeOutBack(clamp((age - 0.4) / 0.7));
+    mail.scale.setScalar(Math.max(0.001, 0.42 * pop)); mail.position.y = aspect / 2 + 0.3 + Math.sin(t * 2) * 0.04;
+    mail.material.rotation = Math.sin(t * 1.5) * 0.12;
+    const pop2 = easeOutBack(clamp((age - 0.9) / 0.7));
+    num.scale.setScalar(Math.max(0.001, 0.75 * pop2 * (1 + 0.04 * Math.sin(t * 4))));
+  };
+  return g;
+}
+
+/* ---- Stage 4: celebration anchored on mailbox #16 ---- */
+function buildMailbox(aspect){
+  const g = new THREE.Group();
+  const haloMat = new THREE.MeshBasicMaterial({ map: dotTex, color: 0xffd36b, transparent: true, opacity: 0, blending: THREE.AdditiveBlending, depthWrite: false });
+  const halo = new THREE.Mesh(new THREE.PlaneGeometry(1.8, 1.8 * Math.max(aspect, 0.6)), haloMat); g.add(halo);
+  const ringMat = new THREE.MeshBasicMaterial({ color: 0xffe08a, transparent: true, opacity: 0, side: THREE.DoubleSide, blending: THREE.AdditiveBlending, depthWrite: false });
+  const ring = new THREE.Mesh(new THREE.RingGeometry(0.48, 0.52, 64), ringMat); ring.position.z = 0.02; g.add(ring);
+
+  // 3D particle bursts that keep popping out of the mailbox
+  const bursts = [];
+  for (let b = 0; b < 4; b++){
+    const N = 160, pos = new Float32Array(N * 3), vel = new Float32Array(N * 3);
+    for (let i = 0; i < N; i++){
+      const th = Math.random() * 6.283, ph = Math.acos(2 * Math.random() - 1), s = 0.6 + Math.random() * 0.4;
+      vel[i*3] = Math.sin(ph) * Math.cos(th) * s; vel[i*3+1] = Math.sin(ph) * Math.sin(th) * s; vel[i*3+2] = Math.abs(Math.cos(ph)) * s;
+    }
+    const geo = new THREE.BufferGeometry(); geo.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+    const mat = new THREE.PointsMaterial({ size: 0.05, map: dotTex, color: new THREE.Color().setHSL(Math.random(), 1, 0.65), transparent: true, opacity: 0, depthWrite: false, blending: THREE.AdditiveBlending });
+    const pts = new THREE.Points(geo, mat); g.add(pts);
+    bursts.push({ pos, vel, geo, mat, offset: b * 0.45, center: new THREE.Vector3((Math.random() - .5) * 0.6, (Math.random() - .5) * 0.4 + 0.1, 0.1) });
+  }
+  g.userData.update = (t, dt, age) => {
+    haloMat.opacity = 0.55 * clamp(age / 0.6) * (0.8 + 0.2 * Math.sin(t * 5));
+    ringMat.opacity = clamp(age / 0.4) * 0.9; ring.scale.setScalar(1 + 0.08 * Math.sin(t * 6));
+    for (const b of bursts){
+      const local = ((age + b.offset) % 1.8) / 1.8;     // 0..1 repeating
+      const r = 0.9 * (1 - Math.pow(1 - local, 3));
+      for (let i = 0; i < b.pos.length; i += 3){
+        b.pos[i]   = b.center.x + b.vel[i] * r;
+        b.pos[i+1] = b.center.y + b.vel[i+1] * r - local * local * 0.25;
+        b.pos[i+2] = b.center.z + b.vel[i+2] * r;
+      }
+      b.geo.attributes.position.needsUpdate = true;
+      b.mat.opacity = (1 - local) * clamp(age / 0.3);
+      if (local < 0.02) b.mat.color.setHSL(Math.random(), 1, 0.65);
+    }
+  };
+  return g;
+}
+
+/* ============================================================================
+   GAME LOGIC — strict linear sequence
+   ========================================================================== */
+const stages = [];     // { group, activatedAt }
+const clock = new THREE.Clock();
+
+function updateDots(){
+  [...$('#dots').children].forEach((d, i) => {
+    d.className = 'dot' + (i < state.stage ? ' done' : (i === state.stage && !state.won ? ' now' : ''));
+  });
+}
+
+/** Called by MindAR whenever any target is seen. Only the expected one reacts. */
+function onTargetFound(index){
+  if (state.won) return;
+  if (index === state.stage) activateStage(index);
+  // Out-of-order targets: deliberately no feedback at all.
+}
+
+function activateStage(i){
+  const s = stages[i]; if (!s || s.activatedAt != null) return;
+  s.group.visible = true; s.activatedAt = clock.getElapsedTime();
+  state.stage = i + 1;
+  updateDots();
+  sfx.chime([523, 587, 659, 784][i]); buzz([40, 40, 80]);
+  const f = $('#flash'); f.classList.remove('go'); void f.offsetWidth; f.classList.add('go');
+
+  if (i === 1) setCold(true);                 // Person → cold atmosphere (subtle hint toward the AC)
+  if (i === 3) win();
+}
+
+function win(){
+  state.won = true;
+  document.body.classList.add('won');
+  const time = fmtTime(Date.now() - state.startTime);
+  setCold(false);
+  startFireworks();
+  setTimeout(() => {
+    $('#finalTime').textContent = 'Escape time: ' + time;
+    $('#victory').hidden = false;
+    requestAnimationFrame(() => $('#victory').classList.add('show'));
+  }, 2600);
+}
+
+function resetGame(){
+  state.stage = 0; state.won = false; state.startTime = Date.now();
+  stages.forEach(s => { s.activatedAt = null; s.group.visible = false; });
+  setCold(false); stopFireworks();
+  document.body.classList.remove('won');
+  $('#victory').classList.remove('show'); $('#victory').hidden = true;
+  updateDots();
+}
+
+/* ============================================================================
+   CAMERA + MINDAR START
+   ========================================================================== */
+function showError(title, msg){
+  $('#errTitle').textContent = title; $('#errMsg').textContent = msg;
+  document.body.classList.remove('playing'); show('#error');
+}
+
+function cameraErrorText(err){
+  const n = err?.name || '';
+  if (n === 'NotAllowedError' || n === 'SecurityError')
+    return ['Camera access blocked',
+      'The game needs the camera.\n\n' +
+      'iPhone: Settings → Safari → Camera → Allow, then reload.\n' +
+      'Android/Chrome: tap the lock icon next to the address → Permissions → Camera → Allow.\n\n' +
+      'If you opened the link inside WhatsApp, Instagram or similar, open it in Safari or Chrome instead.'];
+  if (n === 'NotFoundError' || n === 'OverconstrainedError' || n === 'DevicesNotFoundError')
+    return ['No camera found', 'No usable camera was found on this device.'];
+  if (n === 'NotReadableError' || n === 'TrackStartError')
+    return ['Camera is busy', 'Another app or tab is using the camera. Close it and try again.'];
+  return ['Could not start the camera', (err?.message || String(err || 'Unknown error'))];
+}
+
+async function startGame(){
+  sfx.init();   // must happen inside a user gesture (iOS)
+  if (!window.isSecureContext)
+    return showError('HTTPS required', 'Camera access only works over HTTPS (e.g. GitHub Pages) or on localhost.');
+  if (!navigator.mediaDevices?.getUserMedia)
+    return showError('Browser not supported', 'This browser cannot access the camera. Use an up-to-date Chrome (Android) or Safari (iPhone).');
+
+  show('#loading');
+  try{
+    // 1) Ask for permission ourselves so we get a meaningful error (MindAR swallows it)
+    $('#loadingText').textContent = 'Requesting camera access…';
+    const probe = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' }, audio: false });
+    probe.getTracks().forEach(t => t.stop());
+  }catch(err){
+    console.error(err); const [t, m] = cameraErrorText(err); return showError(t, m);
+  }
+
+  try{
+    $('#loadingText').textContent = 'Loading AR engine…';
+    const { MindARThree } = await import('mindar-image-three');
+    const src = URL.createObjectURL(new Blob([state.mind], { type: 'application/octet-stream' }));
+
+    const mindar = new MindARThree({
+      container: $('#ar'),
+      imageTargetSrc: src,
+      maxTrack: 1,
+      uiLoading: 'no', uiScanning: 'no', uiError: 'no',   // we draw our own clue-free UI
+      filterMinCF: 0.0001, filterBeta: 0.001,             // smoothing (less jitter)
+      warmupTolerance: 3, missTolerance: 6,
+    });
+    state.mindar = mindar;
+    const { renderer, scene, camera } = mindar;
+    renderer.outputColorSpace = THREE.SRGBColorSpace;
+
+    scene.add(new THREE.HemisphereLight(0xffffff, 0x445566, 1.4));
+    const dl = new THREE.DirectionalLight(0xffffff, 1.4); dl.position.set(0.5, 1, 1.5); scene.add(dl);
+
+    // Build one anchor per target, in game order
+    const builders = [buildProjector, buildScarf, buildAC, buildMailbox];
+    TARGETS.forEach((t, i) => {
+      const anchor = mindar.addAnchor(i);
+      const img = state.images[t.key];
+      const group = builders[i](img.h / img.w);
+      group.visible = false;
+      anchor.group.add(group);
+      anchor.onTargetFound = () => onTargetFound(i);
+      stages[i] = { group, activatedAt: null };
+    });
+
+    $('#loadingText').textContent = 'Starting camera…';
+    await mindar.start();
+
+    renderer.setAnimationLoop(() => {
+      const dt = Math.min(0.05, clock.getDelta()), t = clock.elapsedTime;
+      for (const s of stages) if (s.activatedAt != null) s.group.userData.update?.(t, dt, t - s.activatedAt);
+      renderer.render(scene, camera);
+    });
+
+    hideAllScreens();
+    document.body.classList.add('playing');
+    resetGame();
+  }catch(err){
+    console.error(err);
+    showError('AR failed to start', (err?.message || 'The AR engine could not start.') + '\n\nCheck your connection, then try again. If it keeps failing, re-calibrate with sharper, more detailed photos.');
+  }
+}
+
+/* ============================================================================
+   WIRING
+   ========================================================================== */
+$('#mainBtn').addEventListener('click', () => state.mind ? startGame() : calibrate());
+$('#resetBtn').addEventListener('click', async () => {
+  if (!confirm('Delete the saved target photos and calibration from this phone?')) return;
+  try{ await db.del(DB_KEY); }catch(e){}
+  state.images = {}; state.mind = null; renderCards(); updateMainBtn(); setStatus('Cleared.');
+});
+$('#errRetry').addEventListener('click', () => location.reload());
+$('#errBack').addEventListener('click', () => location.reload());
+$('#exitBtn').addEventListener('click', () => { if (confirm('Leave the game and return to setup?')) location.reload(); });
+$('#againBtn').addEventListener('click', resetGame);
+
+// Game-master override: triple-tap the timer to force the current stage
+let taps = [];
+$('#timer').addEventListener('click', () => {
+  const now = Date.now(); taps = taps.filter(x => now - x < 700); taps.push(now);
+  if (taps.length >= 3){ taps = []; if (!state.won && state.stage < 4) activateStage(state.stage); }
 });
 
-function captureIdx(){
-  if (retakeIdx >= 0) return retakeIdx;
-  return refs.findIndex(r => !r);
-}
-function refreshSetup(){
-  const ci = captureIdx(), all = refs.every(Boolean);
-  [...cardsEl.children].forEach((c,i) => {
-    const th = c.querySelector('.thumb');
-    if (refs[i]){ th.style.backgroundImage = `url(${refs[i]})`; th.textContent = ''; }
-    else { th.style.backgroundImage = ''; th.textContent = i+1; }
-    c.classList.toggle('active', i === ci);
-    c.querySelector('.retake').style.visibility = refs[i] ? 'visible' : 'hidden';
-  });
-  if (ci >= 0){
-    $('#stepText').innerHTML = `שלב ${ci+1} מתוך 3: ${STAGES[ci].capture}<small>מרכזו את החפץ בתוך המסגרת ולחצו על הכפתור הצהוב</small>`;
-    show('#shutter', true); show('#guide', true);
-  } else {
-    $('#stepText').innerHTML = `כל 3 היעדים נשמרו ✓<small>כוונו את המצלמה לכל חפץ ובדקו שמד הזיהוי שלו מתמלא בירוק</small>`;
-    show('#shutter', false); show('#guide', false);
-  }
-  $('#startBtn').disabled = !all;
-  show('#resumeBtn', !!(G && !G.done));
-  $('#sens').value = sens; $('#sensVal').textContent = sens;
-  $('#arrowDir').value = arrowDir;
-  $('#codeIn').value = finalCode;
-}
-
-$('#shutter').onclick = () => {
-  const i = captureIdx(); if (i < 0 || !video.videoWidth) return;
-  const g = guideRect(), m = coverMap();
-  const vx = (g.x - m.ox)/m.s, vy = (g.y - m.oy)/m.s, vw = g.w/m.s, vh = g.h/m.s;
-  const W = 260, H = Math.round(W * g.h / g.w);
-  const c = document.createElement('canvas'); c.width = W; c.height = H;
-  const cx = c.getContext('2d'); cx.imageSmoothingQuality = 'high';
-  cx.drawImage(video, vx, vy, vw, vh, 0, 0, W, H);
-  const url = c.toDataURL('image/jpeg', 0.8);
-  refs[i] = url;
-  if (!lsSet(STAGES[i].key, url)) toast('⚠️ לא ניתן לשמור בזיכרון הדפדפן');
-  loadTemplate(i);
-  retakeIdx = -1;
-  const el = $('#guide'); el.classList.remove('flash'); void el.offsetWidth; el.classList.add('flash');
-  tone(1200,.06,'square',.08); buzz(30);
-  refreshSetup();
-};
-$('#sens').oninput = e => { sens = +e.target.value; $('#sensVal').textContent = sens; lsSet('ar_sens', sens); };
-$('#arrowDir').onchange = e => { arrowDir = e.target.value; lsSet('ar_dir', arrowDir); };
-$('#codeIn').oninput = e => { finalCode = e.target.value.replace(/\s/g,'').slice(0,6) || '472'; lsSet('ar_code', finalCode); };
-$('#clearBtn').onclick = () => {
-  if (!confirm('למחוק את כל 3 הצילומים ולהתחיל את ההגדרה מחדש?')) return;
-  STAGES.forEach((s,i) => { lsSet(s.key, null); refs[i] = null; tpls[i] = null; });
-  retakeIdx = -1; G = null; refreshSetup();
-};
-$('#startBtn').onclick = () => startGame();
-$('#resumeBtn').onclick = () => { G.paused = false; setMode('game'); };
-$('#gearBtn').onclick = () => { if (G) G.paused = true; retakeIdx = -1; setMode('setup'); };
-$('#introStart').onclick = () => startGame();
-$('#againBtn').onclick = () => { confetti = []; startGame(); };
-$('#skipBtn').onclick = () => { if (G && !G.done) completeStage(true); };
-
-$('#camBtn').onclick = async () => {
-  $('#err').textContent = '';
-  tone(1,.01,'sine',.001); // unlock audio on iOS
+// Load a previous calibration if there is one
+(async function init(){
   try{
-    await startCamera();
-    resize();
-    await Promise.all([0,1,2].map(loadTemplate));
-    setMode(refs.every(Boolean) ? 'intro' : 'setup');
-  }catch(e){
-    const msg = (e && e.name === 'NotAllowedError')
-      ? 'הגישה למצלמה נחסמה. אשרו גישה למצלמה בהגדרות הדפדפן ונסו שוב.'
-      : (e && e.message) || 'לא ניתן להפעיל את המצלמה.';
-    $('#err').textContent = msg + (location.protocol !== 'https:' && location.hostname !== 'localhost'
-      ? ' (שימו לב: מצלמה עובדת רק בכתובת https)' : '');
-  }
-};
-
-/* ---------- Toast ---------- */
-let toastT = 0;
-function toast(txt){
-  const t = $('#toast'); t.textContent = txt; t.classList.add('show');
-  clearTimeout(toastT); toastT = setTimeout(() => t.classList.remove('show'), 1800);
-}
-
-/* ============================================================
-   GAME LOGIC
-   ============================================================ */
-function newStageState(){
-  return { locked:false, buf:[], lastGood:0, lockTime:0, firstLock:0, pos:null, sp:null, alpha:0, conf:0, particles:[] };
-}
-function startGame(){
-  if (!refs.every(Boolean)){ setMode('setup'); return; }
-  G = { stage:0, t0:performance.now(), elapsed:0, done:false, paused:false, after:null, ...newStageState() };
-  updateHUD();
-  setMode('game');
-}
-function updateHUD(){
-  if (!G) return;
-  [...$('#dots').children].forEach((d,i) => { d.className = i < G.stage ? 'done' : i === G.stage ? 'on' : ''; });
-  if (G.stage < 3){
-    const s = STAGES[G.stage];
-    $('#stageLabel').textContent = `שלב ${G.stage+1} מתוך 3 · ${s.name}`;
-    $('#promptText').textContent = G.locked ? s.found : s.find;
-    $('#prompt').classList.toggle('found', G.locked);
-  }
-}
-function completeStage(skipped){
-  const prev = G.stage, now = performance.now();
-  G.after = { stage:prev, pos: G.sp ? { ...G.sp } : { x:sw/2, y:sh*0.4, w:sw*0.6, h:sw*0.37 }, t:now, since: now - (G.firstLock || now) };
-  G.stage++;
-  Object.assign(G, newStageState());
-  $('#prog i').style.width = '0%';
-  if (G.stage >= 3){
-    G.done = true; G.elapsed = now - G.t0;
-    sfxWin(); toast('🔓 הקוד נחשף!');
-    setTimeout(showWin, 1400);
-  } else {
-    sfxStage(); toast(skipped ? `⏭ שלב ${prev+1} דולג` : `✓ שלב ${prev+1} הושלם!`);
-  }
-  updateHUD();
-}
-function showWin(){
-  const cb = $('#winCode'); cb.innerHTML = '';
-  [...finalCode].forEach(ch => { const s = document.createElement('span'); s.textContent = ch; cb.appendChild(s); });
-  $('#winTime').textContent = 'זמן הבריחה: ' + fmt(G.elapsed);
-  spawnConfetti();
-  setMode('win');
-}
-const fmt = ms => { const s = Math.floor(ms/1000); return String(Math.floor(s/60)).padStart(2,'0') + ':' + String(s%60).padStart(2,'0'); };
-
-function detect(){
-  if (!G || G.done || G.paused || G.stage > 2) return;
-  const T = tpls[G.stage]; if (!T) return;
-  const L = grabLive(); if (!L) return;
-  const m = match(L, T, 2), thr = threshold(), now = performance.now();
-  G.conf = m.conf;
-  G.buf.push(m.conf >= thr); if (G.buf.length > 5) G.buf.shift();
-  const hits = G.buf.reduce((a,b) => a + (b?1:0), 0);
-
-  if (m.t && m.conf >= thr*0.85){
-    G.pos = { x:(m.x + m.t.w/2)/PW*sw, y:(m.y + m.t.h/2)/PH*sh, w:m.t.w/PW*sw, h:m.t.h/PH*sh };
-    if (!G.sp) G.sp = { ...G.pos };
-    if (G.locked) G.lastGood = now;
-  }
-  if (hits >= 3){
-    G.lastGood = now;
-    if (!G.locked){
-      G.locked = true;
-      if (!G.firstLock) G.firstLock = now;
-      sfxFound(); updateHUD();
+    const saved = await db.get(DB_KEY);
+    if (saved?.images && saved?.mind){
+      state.images = saved.images; state.mind = saved.mind;
+      setStatus('Saved calibration loaded ✓', 'ok');
     }
-  }
-  if (G.locked && now - G.lastGood > 1800){ G.locked = false; updateHUD(); }
-}
-
-/* ---------- setup live meters ---------- */
-function setupMeters(){
-  if (!video.videoWidth) return;
-  const L = grabLive(); if (!L) return;
-  const thr = threshold();
-  [...cardsEl.children].forEach((c,i) => {
-    const bar = c.querySelector('.meter i'), val = c.querySelector('.mval');
-    if (!tpls[i]){ bar.style.width = '0%'; val.textContent = '–'; return; }
-    const conf = match(L, tpls[i], 3).conf;
-    bar.style.width = Math.round(Math.min(1, conf)*100) + '%';
-    bar.style.background = conf >= thr ? 'var(--ok)' : conf >= thr*0.85 ? 'var(--accent)' : 'var(--bad)';
-    val.textContent = Math.round(conf*100) + '%' + (conf >= thr ? ' ✓' : '');
-  });
-}
-
-/* ============================================================
-   RENDER LOOP
-   ============================================================ */
-let lastT = performance.now(), lastDet = 0, confetti = [];
-function loop(t){
-  requestAnimationFrame(loop);
-  const dt = Math.min(0.05, (t - lastT)/1000); lastT = t;
-
-  if (mode === 'game' && t - lastDet > 100){ lastDet = t; detect(); }
-  else if (mode === 'setup' && t - lastDet > 350){ lastDet = t; setupMeters(); }
-
-  ctx.clearRect(0, 0, sw, sh);
-
-  if (mode === 'game' && G){
-    if (!G.done && !G.paused){
-      G.elapsed = t - G.t0;
-      $('#timer').textContent = fmt(G.elapsed);
-      const thr = threshold();
-      $('#confMini i').style.width = Math.round(Math.min(1,G.conf)*100) + '%';
-      $('#confMini b').style.left = Math.round(thr*90) + 'px';
-    }
-    // afterglow of previous stage
-    if (G.after){
-      const age = t - G.after.t, a = 1 - age/2600;
-      if (a <= 0) G.after = null;
-      else STAGES[G.after.stage].draw(G.after.pos, t, a*a, G.after.since + age, G);
-    }
-    if (G.stage < 3){
-      G.alpha += ((G.locked ? 1 : 0) - G.alpha) * Math.min(1, dt*6);
-      if (G.pos){
-        if (!G.sp) G.sp = { ...G.pos };
-        const k = Math.min(1, dt*8);
-        for (const p of ['x','y','w','h']) G.sp[p] += (G.pos[p] - G.sp[p]) * k;
-      }
-      if (G.locked && !G.paused){
-        G.lockTime += dt*1000;
-        $('#prog i').style.width = Math.min(100, G.lockTime / STAGES[G.stage].hold * 100) + '%';
-        if (G.lockTime >= STAGES[G.stage].hold){ completeStage(false); }
-      }
-      if (G.stage < 3){
-        if (G.alpha > 0.02 && G.sp) STAGES[G.stage].draw(G.sp, t, G.alpha, t - (G.firstLock||t), G);
-        if (!G.locked) drawScanner(t);
-      }
-    }
-  }
-  if (confetti.length) drawConfetti(dt);
-}
-requestAnimationFrame(loop);
-
-/* ============================================================
-   AR OVERLAYS
-   ============================================================ */
-const ANG = { down:Math.PI/2, up:-Math.PI/2, right:0, left:Math.PI };
-
-function brackets(p, color, a, t){
-  const x0 = p.x - p.w/2, y0 = p.y - p.h/2, x1 = p.x + p.w/2, y1 = p.y + p.h/2;
-  const L = Math.min(p.w, p.h) * 0.24, pulse = 0.6 + 0.4*Math.sin(t*0.006);
-  ctx.save(); ctx.globalAlpha = a; ctx.strokeStyle = color; ctx.lineWidth = 4; ctx.lineCap = 'round';
-  ctx.shadowColor = color; ctx.shadowBlur = 16*pulse;
-  ctx.beginPath();
-  ctx.moveTo(x0, y0+L); ctx.lineTo(x0, y0); ctx.lineTo(x0+L, y0);
-  ctx.moveTo(x1-L, y0); ctx.lineTo(x1, y0); ctx.lineTo(x1, y0+L);
-  ctx.moveTo(x1, y1-L); ctx.lineTo(x1, y1); ctx.lineTo(x1-L, y1);
-  ctx.moveTo(x0+L, y1); ctx.lineTo(x0, y1); ctx.lineTo(x0, y1-L);
-  ctx.stroke(); ctx.restore();
-}
-
-function drawScanner(t){
-  const cx = sw/2, cy = sh*0.42, r = Math.min(sw, sh)*0.18;
-  ctx.save(); ctx.globalAlpha = 0.55; ctx.strokeStyle = '#fff'; ctx.lineWidth = 2;
-  ctx.setLineDash([8, 10]); ctx.lineDashOffset = -t*0.03;
-  ctx.beginPath(); ctx.arc(cx, cy, r, 0, Math.PI*2); ctx.stroke();
-  ctx.setLineDash([]);
-  const a = t*0.002;
-  ctx.globalAlpha = 0.35; ctx.strokeStyle = '#4fe3ff'; ctx.lineWidth = 3;
-  ctx.beginPath(); ctx.arc(cx, cy, r*0.75, a, a+1.2); ctx.stroke();
-  ctx.beginPath(); ctx.arc(cx, cy, r*0.75, a+Math.PI, a+Math.PI+1.2); ctx.stroke();
-  ctx.restore();
-}
-
-/* ---------- Stage 1: projector light beams + arrow ---------- */
-function drawProjector(p, t, a){
-  const ang = ANG[arrowDir] ?? ANG.down;
-  const R = Math.max(p.w, p.h);
-  const len = Math.hypot(sw, sh) * 0.9;
-  ctx.save();
-  ctx.globalAlpha = a;
-  ctx.globalCompositeOperation = 'lighter';
-
-  // light cones
-  ctx.save(); ctx.translate(p.x, p.y); ctx.rotate(ang);
-  for (let k=0; k<4; k++){
-    const spread = 0.16 + k*0.07;
-    const flick = 0.55 + 0.25*Math.sin(t*0.004 + k*1.7) + 0.1*Math.sin(t*0.017 + k);
-    const gr = ctx.createLinearGradient(0, 0, len, 0);
-    gr.addColorStop(0, `rgba(255,244,200,${0.38*flick})`);
-    gr.addColorStop(0.5, `rgba(255,220,140,${0.12*flick})`);
-    gr.addColorStop(1, 'rgba(255,200,100,0)');
-    ctx.fillStyle = gr;
-    ctx.beginPath(); ctx.moveTo(0, -4); ctx.lineTo(len, -Math.tan(spread)*len);
-    ctx.lineTo(len, Math.tan(spread)*len); ctx.lineTo(0, 4); ctx.closePath(); ctx.fill();
-  }
-  // dust motes in the beam
-  for (let k=0; k<40; k++){
-    const d = ((k*137.5 + t*0.06*(0.5 + (k%5)/5)) % (len*0.7)) + 20;
-    const off = Math.sin(k*12.9898)*Math.tan(0.3)*d*0.8;
-    const s = 1 + (k%3);
-    ctx.fillStyle = `rgba(255,250,220,${0.5*(1 - d/(len*0.7))})`;
-    ctx.beginPath(); ctx.arc(d, off + Math.sin(t*0.002 + k)*4, s, 0, Math.PI*2); ctx.fill();
-  }
-  ctx.restore();
-
-  // rotating rays around the lens
-  ctx.save(); ctx.translate(p.x, p.y); ctx.rotate(t*0.0004);
-  for (let k=0; k<16; k++){
-    const l = R*(0.45 + 0.2*Math.sin(t*0.005 + k*2.1));
-    ctx.rotate(Math.PI*2/16);
-    const gr = ctx.createLinearGradient(0, 0, l, 0);
-    gr.addColorStop(0, 'rgba(255,240,180,0.7)'); gr.addColorStop(1, 'rgba(255,240,180,0)');
-    ctx.strokeStyle = gr; ctx.lineWidth = 3;
-    ctx.beginPath(); ctx.moveTo(R*0.12, 0); ctx.lineTo(l, 0); ctx.stroke();
-  }
-  ctx.restore();
-
-  // lens glow
-  const pulse = 0.8 + 0.2*Math.sin(t*0.008);
-  const rg = ctx.createRadialGradient(p.x, p.y, 0, p.x, p.y, R*0.42*pulse);
-  rg.addColorStop(0, 'rgba(255,255,240,0.95)'); rg.addColorStop(0.25, 'rgba(255,230,150,0.6)'); rg.addColorStop(1, 'rgba(255,200,80,0)');
-  ctx.fillStyle = rg; ctx.beginPath(); ctx.arc(p.x, p.y, R*0.42*pulse, 0, Math.PI*2); ctx.fill();
-  ctx.restore();
-
-  // big animated arrow
-  ctx.save();
-  ctx.globalAlpha = a;
-  const dist = Math.max(R*0.6, 90) + 14*Math.sin(t*0.006);
-  let ax = p.x + Math.cos(ang)*dist, ay = p.y + Math.sin(ang)*dist;
-  ax = Math.max(60, Math.min(sw-60, ax)); ay = Math.max(110, Math.min(sh-220, ay));
-  ctx.translate(ax, ay); ctx.rotate(ang);
-  ctx.shadowColor = '#ffb300'; ctx.shadowBlur = 22;
-  for (let k=0; k<3; k++){
-    const ph = ((t*0.0025 - k*0.33) % 1 + 1) % 1;
-    ctx.globalAlpha = a * (0.25 + 0.75*(1 - Math.abs(ph*2 - 1)));
-    const x = k*34;
-    ctx.fillStyle = '#ffd34d'; ctx.strokeStyle = '#3a2a00'; ctx.lineWidth = 3;
-    ctx.beginPath();
-    ctx.moveTo(x - 6, -34); ctx.lineTo(x + 24, 0); ctx.lineTo(x - 6, 34);
-    ctx.lineTo(x - 22, 34); ctx.lineTo(x + 8, 0); ctx.lineTo(x - 22, -34); ctx.closePath();
-    ctx.fill(); ctx.stroke();
-  }
-  ctx.restore();
-
-  // label
-  ctx.save(); ctx.globalAlpha = a;
-  const lx = Math.max(80, Math.min(sw-80, ax + Math.cos(ang)*130)), ly = Math.max(120, Math.min(sh-200, ay + Math.sin(ang)*120));
-  ctx.font = '800 20px Rubik, Heebo, system-ui, sans-serif'; ctx.textAlign = 'center'; ctx.direction = 'rtl';
-  ctx.lineWidth = 5; ctx.strokeStyle = 'rgba(0,0,0,.7)'; ctx.strokeText('אל מסך ההקרנה', lx, ly);
-  ctx.fillStyle = '#ffe58a'; ctx.fillText('אל מסך ההקרנה', lx, ly);
-  ctx.restore();
-}
-
-/* ---------- Stage 2: student on screen, speech bubble ---------- */
-function wrap(text, maxW){
-  const words = text.split(' '), lines = []; let cur = '';
-  for (const w of words){
-    const test = cur ? cur + ' ' + w : w;
-    if (ctx.measureText(test).width > maxW && cur){ lines.push(cur); cur = w; } else cur = test;
-  }
-  if (cur) lines.push(cur);
-  return lines;
-}
-function roundRect(x, y, w, h, r){
-  ctx.beginPath(); ctx.moveTo(x+r, y); ctx.arcTo(x+w, y, x+w, y+h, r); ctx.arcTo(x+w, y+h, x, y+h, r);
-  ctx.arcTo(x, y+h, x, y, r); ctx.arcTo(x, y, x+w, y, r); ctx.closePath();
-}
-function drawStudent(p, t, a, since){
-  brackets(p, '#4fe3ff', a, t);
-  // scan line
-  ctx.save(); ctx.globalAlpha = a*0.6;
-  const sy = p.y - p.h/2 + ((t*0.12) % p.h);
-  const gr = ctx.createLinearGradient(0, sy-14, 0, sy+2);
-  gr.addColorStop(0, 'rgba(79,227,255,0)'); gr.addColorStop(1, 'rgba(79,227,255,.8)');
-  ctx.fillStyle = gr; ctx.fillRect(p.x - p.w/2, sy-14, p.w, 16);
-  ctx.restore();
-
-  // speech bubble with typewriter text
-  const chars = Math.max(0, Math.floor((since - 300) / 45));
-  const txt = STUDENT_LINE.slice(0, chars);
-  ctx.save(); ctx.globalAlpha = a;
-  ctx.font = '700 18px Rubik, Heebo, system-ui, sans-serif'; ctx.direction = 'rtl'; ctx.textAlign = 'center';
-  const bw = Math.min(sw - 32, 330), pad = 16, lh = 26;
-  const lines = wrap(STUDENT_LINE, bw - pad*2);          // layout from full text so bubble doesn't jump
-  const bh = lines.length*lh + pad*2;
-  let bx = Math.max(16, Math.min(sw - 16 - bw, p.x - bw/2));
-  let by = p.y - p.h/2 - bh - 26, tailUp = false;
-  if (by < 70){ by = Math.min(sh - 200 - bh, p.y + p.h/2 + 26); tailUp = true; }
-  const pop = Math.min(1, since/250), sc = 0.7 + 0.3*pop;
-  ctx.translate(bx + bw/2, by + bh/2); ctx.scale(sc, sc); ctx.translate(-(bx + bw/2), -(by + bh/2));
-  ctx.shadowColor = 'rgba(79,227,255,.6)'; ctx.shadowBlur = 20;
-  ctx.fillStyle = 'rgba(255,255,255,.96)'; roundRect(bx, by, bw, bh, 18); ctx.fill();
-  ctx.shadowBlur = 0;
-  // tail
-  const tx = Math.max(bx+30, Math.min(bx+bw-30, p.x));
-  ctx.beginPath();
-  if (!tailUp){ ctx.moveTo(tx-12, by+bh-1); ctx.lineTo(tx, by+bh+18); ctx.lineTo(tx+12, by+bh-1); }
-  else { ctx.moveTo(tx-12, by+1); ctx.lineTo(tx, by-18); ctx.lineTo(tx+12, by+1); }
-  ctx.fill();
-  // text (re-wrap the typed portion along the same line breaks)
-  ctx.fillStyle = '#10223a';
-  let left = txt.length;
-  lines.forEach((ln, i) => {
-    if (left <= 0) return;
-    const part = ln.slice(0, left); left -= ln.length + 1;
-    ctx.fillText(part, bx + bw/2, by + pad + lh*(i+1) - 7);
-  });
-  if (chars < STUDENT_LINE.length && Math.floor(t/300)%2){
-    ctx.fillStyle = '#4fe3ff'; ctx.fillRect(bx + 14, by + bh - 14, 8, 3);
-  }
-  ctx.restore();
-}
-
-/* ---------- Stage 3: air conditioner, snow + code reveal ---------- */
-function drawAC(p, t, a, since, state){
-  brackets(p, '#a9ecff', a, t);
-  const parts = state && state.stage === 2 ? state.particles : null;
-  ctx.save(); ctx.globalAlpha = a;
-
-  // cold wind streaks
-  ctx.globalCompositeOperation = 'lighter';
-  for (let k=0; k<10; k++){
-    const ph = ((t*0.0006 + k/10) % 1);
-    const x = p.x - p.w*0.4 + (k/9)*p.w*0.8;
-    const y0 = p.y + p.h*0.3 + ph*sh*0.35;
-    ctx.strokeStyle = `rgba(160,230,255,${0.35*(1-ph)})`; ctx.lineWidth = 2;
-    ctx.beginPath(); ctx.moveTo(x, y0);
-    ctx.quadraticCurveTo(x + Math.sin(k + t*0.002)*30, y0 + 40, x + Math.sin(k)*20, y0 + 80); ctx.stroke();
-  }
-  ctx.globalCompositeOperation = 'source-over';
-
-  // snow particles (stateful when live, simple deterministic when afterglow)
-  if (parts){
-    const now = t;
-    if (parts.length < 140) for (let i=0; i<3; i++) parts.push({
-      x: p.x + (Math.random()-0.5)*p.w*0.85, y: p.y + p.h*0.25,
-      vx: (Math.random()-0.5)*30, vy: 50 + Math.random()*110, s: 5 + Math.random()*12,
-      r: Math.random()*6, born: now, life: 2200 + Math.random()*1800 });
-    for (let i = parts.length-1; i >= 0; i--){
-      const q = parts[i], age = now - q.born;
-      if (age > q.life){ parts.splice(i,1); continue; }
-      const dtp = 1/60;
-      q.x += (q.vx + Math.sin(age*0.003 + q.r)*25)*dtp; q.y += q.vy*dtp;
-      const la = 1 - age/q.life;
-      drawFlake(q.x, q.y, q.s, age*0.002 + q.r, la);
-    }
-  } else {
-    for (let k=0; k<40; k++){
-      const ph = ((t*0.0004 + k*0.137) % 1);
-      drawFlake(p.x + Math.sin(k*7.1)*p.w*0.45, p.y + p.h*0.25 + ph*sh*0.4, 6 + (k%4)*3, t*0.002 + k, 1-ph);
-    }
-  }
-
-  // frost glow on the unit
-  const rg = ctx.createRadialGradient(p.x, p.y, 0, p.x, p.y, Math.max(p.w,p.h)*0.7);
-  rg.addColorStop(0, 'rgba(200,245,255,.25)'); rg.addColorStop(1, 'rgba(200,245,255,0)');
-  ctx.fillStyle = rg; ctx.fillRect(p.x - p.w, p.y - p.h, p.w*2, p.h*2);
-
-  // code reveal
-  const digits = [...finalCode], n = digits.length;
-  const box = Math.min(56, (sw - 40) / n - 10), gap = 10;
-  const totalW = n*box + (n-1)*gap;
-  let cy = p.y + p.h/2 + 50;
-  cy = Math.max(130, Math.min(sh - 210 - box, cy));
-  const x0 = sw/2 - totalW/2;
-  ctx.font = '800 16px Rubik, Heebo, system-ui, sans-serif'; ctx.textAlign = 'center'; ctx.direction = 'rtl';
-  ctx.lineWidth = 4; ctx.strokeStyle = 'rgba(0,0,0,.6)';
-  ctx.strokeText('הקוד הסודי', sw/2, cy - 12); ctx.fillStyle = '#dffaff'; ctx.fillText('הקוד הסודי', sw/2, cy - 12);
-  ctx.direction = 'ltr';
-  digits.forEach((d, i) => {
-    const appear = Math.max(0, Math.min(1, (since - 900 - i*650) / 300));
-    const x = x0 + i*(box + gap);
-    ctx.save();
-    ctx.shadowColor = '#4fe3ff'; ctx.shadowBlur = 18*appear;
-    ctx.fillStyle = 'rgba(10,30,50,.75)'; roundRect(x, cy, box, box*1.2, 12); ctx.fill();
-    ctx.strokeStyle = appear > 0 ? '#4fe3ff' : 'rgba(255,255,255,.3)'; ctx.lineWidth = 2.5; ctx.stroke();
-    ctx.shadowBlur = 0;
-    if (appear > 0){
-      ctx.globalAlpha = a*appear;
-      ctx.font = `800 ${Math.round(box*0.7)}px Rubik, Heebo, system-ui, sans-serif`;
-      ctx.fillStyle = '#ffffff'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
-      ctx.fillText(d, x + box/2, cy + box*0.6 + (1-appear)*10);
-    } else {
-      ctx.font = `700 ${Math.round(box*0.5)}px system-ui`; ctx.fillStyle = 'rgba(255,255,255,.35)';
-      ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.fillText('?', x + box/2, cy + box*0.6);
-    }
-    ctx.restore();
-  });
-  ctx.restore();
-}
-function drawFlake(x, y, s, rot, alpha){
-  ctx.save(); ctx.translate(x, y); ctx.rotate(rot); ctx.globalAlpha *= Math.max(0, alpha);
-  ctx.strokeStyle = '#eafcff'; ctx.lineWidth = Math.max(1, s/7); ctx.lineCap = 'round';
-  ctx.shadowColor = '#bff3ff'; ctx.shadowBlur = 6;
-  ctx.beginPath();
-  for (let k=0; k<6; k++){
-    ctx.moveTo(0,0); ctx.lineTo(0, -s/2);
-    ctx.moveTo(0, -s*0.3); ctx.lineTo(-s*0.12, -s*0.42);
-    ctx.moveTo(0, -s*0.3); ctx.lineTo(s*0.12, -s*0.42);
-    ctx.rotate(Math.PI/3);
-  }
-  ctx.stroke(); ctx.restore();
-}
-
-/* ---------- Confetti ---------- */
-function spawnConfetti(){
-  const cols = ['#ffd34d','#4fe3ff','#3ddc84','#ff5c8a','#b388ff','#ffffff'];
-  confetti = [];
-  for (let i=0; i<180; i++) confetti.push({
-    x: sw/2 + (Math.random()-0.5)*80, y: sh*0.35,
-    vx: (Math.random()-0.5)*700, vy: -300 - Math.random()*600,
-    w: 6 + Math.random()*8, h: 4 + Math.random()*6, r: Math.random()*6, vr: (Math.random()-0.5)*12,
-    c: cols[i % cols.length], life: 4 + Math.random()*2 });
-}
-function drawConfetti(dt){
-  for (let i = confetti.length-1; i >= 0; i--){
-    const q = confetti[i];
-    q.vy += 900*dt; q.vx *= 0.99; q.x += q.vx*dt; q.y += q.vy*dt; q.r += q.vr*dt; q.life -= dt;
-    if (q.life <= 0 || q.y > sh + 40){ confetti.splice(i,1); continue; }
-    ctx.save(); ctx.translate(q.x, q.y); ctx.rotate(q.r); ctx.globalAlpha = Math.min(1, q.life);
-    ctx.fillStyle = q.c; ctx.fillRect(-q.w/2, -q.h/2, q.w, q.h); ctx.restore();
-  }
-}
-
-/* ---------- init ---------- */
-resize();
-document.addEventListener('visibilitychange', () => {
-  if (document.visibilityState === 'visible' && mode === 'game'){
-    try{ navigator.wakeLock && navigator.wakeLock.request('screen').then(w=>wakeLock=w).catch(()=>{}); }catch(e){}
-  }
-});
+  }catch(e){ console.warn('IndexedDB unavailable', e); }
+  renderCards(); updateMainBtn(); updateDots();
 })();
 </script>
 </body>
