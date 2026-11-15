@@ -276,7 +276,7 @@ select{width:100%;font:inherit;padding:10px;border-radius:12px;background:#121a3
   <div class="hero glass">
     <div class="logo">🏆</div>
     <h1>פיצחתם את החידה!</h1>
-    <p>קחו את המפתח מהתלמיד, ופתחו את תא הדואר שמספרו מופיע על המזגן. כל הכבוד, צוות!</p>
+    <p>קחו את המפתח מיואב פינוס, ופתחו את תא הדואר שמספרו מופיע על המזגן. כל הכבוד, צוות!</p>
     <button id="btnAgain" class="btn primary big">🔁 שחקו שוב</button>
     <button id="btnWinSetup" class="btn ghost big" style="margin-top:10px">⚙️ מצב הגדרת משחק</button>
   </div>
@@ -308,21 +308,22 @@ const video = $('#cam'), fx = $('#fx'), g = fx.getContext('2d');
 const LS = 'classEscapeAR.v1.';
 const clamp = (v, a, b) => Math.min(b, Math.max(a, v));
 
+const STUDENT_NAME = 'יואב פינוס';
 const STAGES = [
   { short:'המקרן', icon:'📽️',
     setupTitle:'צלמו את המקרן בתקרה',
     scanHint:'כוונו את המצלמה אל המקרן שבתקרה',
-    prompt:'המקרן פועל! עקבו אחר האור אל מסך ההקרנה.',
-    spotHint:'הקישו על עדשת המקרן', next:'מצאנו את המסך ›' },
+    prompt:`המקרן פועל! עקבו אחר האור אל מסך ההקרנה – שם מחכה לכם ${STUDENT_NAME}.`,
+    spotHint:'הקישו על עדשת המקרן', next:`אל ${STUDENT_NAME} שעל המסך ›` },
   { short:'התלמיד', icon:'🧑‍🎓',
     setupTitle:'צלמו את התלמיד על מסך ההקרנה',
-    scanHint:'כוונו את המצלמה אל מסך ההקרנה',
-    prompt:'בררר... קר פה! מי אחראי על הטמפרטורה בכיתה?',
+    scanHint:`כוונו את המצלמה אל ${STUDENT_NAME} שעל מסך ההקרנה`,
+    prompt:`בררר... ל${STUDENT_NAME} קר פה! מי אחראי על הטמפרטורה בכיתה? זכרו אותו – המפתח אצלו.`,
     spotHint:'הקישו על הצוואר של התלמיד', next:'לשלב הבא ›' },
   { short:'המזגן', icon:'❄️',
     setupTitle:'צלמו את המזגן',
     scanHint:'כוונו את המצלמה אל המזגן',
-    prompt:'המספר שעל המזגן הוא מספר תא הדואר! קחו את המפתח מהתלמיד שראיתם קודם.',
+    prompt:`המספר שעל המזגן הוא מספר תא הדואר! בקשו את המפתח מ${STUDENT_NAME}.`,
     spotHint:'הקישו על תצוגת הטמפרטורה', next:'פתחנו את תא הדואר! 🎉' }
 ];
 const DEF_HOT = [{x:.5,y:.5},{x:.5,y:.62},{x:.72,y:.6}];
@@ -1049,6 +1050,15 @@ function drawStudent(b, t){
   g.restore();
   g.save(); ga(1);
   textPill('בררר!', hx - hs*0.62 + jx*1.5, Math.max(190, hy - hs*0.85 + jy*1.5), Math.round(clamp(es*0.5, 15, 24)), 'rgba(255,255,255,.95)', '#0d4f7a');
+  g.restore();
+
+  // name badge under the scarf
+  const nfs = Math.round(clamp(b.w*0.075, 18, 30));
+  const scarfW = clamp(b.w*0.46, 90, W*0.7);
+  const ny = clamp(hy + jy + scarfW*0.21*3.9 + nfs, 200, H - 280);
+  g.save(); ga(1);
+  g.shadowColor = '#ffd23f'; g.shadowBlur = 22 + 10*Math.sin(t*3);
+  textPill('🧑‍🎓 ' + STUDENT_NAME, hx + jx, ny, nfs, 'rgba(255,210,63,.97)', '#1d1300');
   g.restore();
 
   drawSnow(b, t);
